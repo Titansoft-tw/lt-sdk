@@ -5,6 +5,11 @@ import PackageDescription
 let package = Package(
     name: "lt-sdk",
     platforms: [.iOS(.v17), .macOS(.v14)],
-    products: [],
-    targets: []
+    products: [
+        .library(name: "LtDeviceInfo", targets: ["LtDeviceInfo"]),
+    ],
+    targets: [
+        .target(name: "LtDeviceInfo", path: "LtDeviceInfo-ios/Sources/LtDeviceInfo"),
+        .testTarget(name: "LtDeviceInfoTests", dependencies: ["LtDeviceInfo"], path: "LtDeviceInfo-ios/Tests/LtDeviceInfoTests"),
+    ]
 )
