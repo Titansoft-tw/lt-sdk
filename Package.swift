@@ -7,9 +7,12 @@ let package = Package(
     platforms: [.iOS(.v17), .macOS(.v14)],
     products: [
         .library(name: "LtDeviceInfo", targets: ["LtDeviceInfo"]),
+        .library(name: "LtTelemetry", targets: ["LtTelemetry"]),
     ],
     targets: [
         .target(name: "LtDeviceInfo", path: "LtDeviceInfo-ios/Sources/LtDeviceInfo"),
         .testTarget(name: "LtDeviceInfoTests", dependencies: ["LtDeviceInfo"], path: "LtDeviceInfo-ios/Tests/LtDeviceInfoTests"),
+        .target(name: "LtTelemetry", dependencies: ["LtDeviceInfo"], path: "LtTelemetry-ios/Sources/LtTelemetry"),
+        .testTarget(name: "LtTelemetryTests", dependencies: ["LtTelemetry"], path: "LtTelemetry-ios/Tests/LtTelemetryTests"),
     ]
 )
