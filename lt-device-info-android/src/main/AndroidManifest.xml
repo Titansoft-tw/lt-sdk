@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Normal permissions (no prompt). READ_PHONE_STATE, RECORD_AUDIO and POST_NOTIFICATIONS stay the app's decision:
+         without them the readers report less, they never ask. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+</manifest>

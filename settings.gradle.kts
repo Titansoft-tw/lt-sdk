@@ -4,3 +4,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "lt-sdk"
+include(":lt-device-info-android")
