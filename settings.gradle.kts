@@ -5,3 +5,4 @@ dependencyResolutionManagement {
 }
 rootProject.name = "lt-sdk"
 include(":lt-device-info-android")
+include(":lt-telemetry-android")
