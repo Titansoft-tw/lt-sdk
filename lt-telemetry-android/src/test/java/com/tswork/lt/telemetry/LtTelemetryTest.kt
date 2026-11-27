@@ -295,6 +295,20 @@ class LtTelemetryTest {
         assertTrue(hits.isEmpty())
     }
 
+    @Test fun anExplicitHttpConfigUrlIsNotFetchedWhenHttpsIsRequired() {
+        val logs = CopyOnWriteArrayList<String>()
+        val t = LtTelemetry(TelemetryConfig("https://otel.invalid/v1/logs", headers = { mapOf("Authorization" to "Bearer t0k") },
+            requireHttps = true, serviceName = "unit-test", device = device, storageDir = dir, log = { logs += it },
+            configUrl = "http://127.0.0.1:${server.localPort}/config/telemetry.json"),
+            retryMs = 50, maxRetryMs = 200, clock = System::currentTimeMillis, jitter = { 0.5 }, poster = { LtTelemetry.PostResult(200) })
+        t.refreshConfig(0)
+        t.onWorker { }
+        Thread.sleep(100)
+        assertTrue(configHits.isEmpty()) // The Bearer token never went out over http.
+        assertTrue(logs.any { it.contains("設定網址不是 https") })
+        assertFalse(logs.any { it.contains("127.0.0.1") })
+    }
+
     @Test fun callMarkerIsWrittenReadAndCleared() {
         val t = telemetry()
         val marker = CallMarker("c-1", "room", "1001", "agora", "agora-4.7.0", 42L)
