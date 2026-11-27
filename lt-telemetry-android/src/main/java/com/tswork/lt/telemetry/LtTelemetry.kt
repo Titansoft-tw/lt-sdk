@@ -6,6 +6,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
@@ -31,6 +32,24 @@ data class TelemetryConfig(
     val maxQueueBytes: Long = TelemetryStore.DEFAULT_MAX_BYTES,
     /** Records not delivered within this long are dropped (counted in the `telemetry/dropped` report). */
     val maxQueueAgeMs: Long = TelemetryStore.DEFAULT_MAX_AGE_MS,
+    /**
+     * When the previous process died within [STARTUP_WINDOW_MS] of starting (a crash loop at launch), the constructor
+     * waits up to this long for the first delivery attempt, so the records about that crash go out before this process
+     * can crash too (Sentry's app-start crash detection). 0 turns it off. Keep it well under the ANR limit.
+     */
+    val startupCrashWaitMs: Long = 2_000,
+    /**
+     * Called on the telemetry thread whenever records are left waiting for a retry, e.g. to schedule a WorkManager job
+     * that calls [LtTelemetry.drain] once the network is back, even if the app is not opened again. Must not block.
+     */
+    val onBacklog: () -> Unit = {},
+    /**
+     * Remote telemetry config ([RemoteTelemetryConfig]): null derives `<base>/config/telemetry.json` from a [logsUrl]
+     * ending in `/v1/logs`; blank turns it off. Fetched with the same [headers].
+     */
+    val configUrl: String? = null,
+    /** `debug` or `release`: what the config's rules match `build` against. */
+    val buildType: String = "release",
 )
 
 /**
@@ -65,10 +84,38 @@ class LtTelemetry internal constructor(
     private val executor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "lt-telemetry").apply { isDaemon = true }
     }
+    private val target = ConfigTarget(config.device.platform, config.device.appVersion, config.buildType)
+    private val configUrl: String? = url?.let { logs ->
+        when {
+            config.configUrl == null -> logs.trimEnd('/').takeIf { it.endsWith("/v1/logs") }?.removeSuffix("/v1/logs")?.plus(CONFIG_PATH)
+            config.configUrl.isBlank() -> null
+            else -> config.configUrl.trim()
+        }
+    }
+    private val configFile get() = File(config.storageDir, CONFIG_FILE)
+    private val etagFile get() = File(config.storageDir, CONFIG_ETAG_FILE)
+    /** This install's rollout bucket (0–99): local only, never sent. */
+    private val bucket: Int by lazy {
+        val file = File(config.storageDir, BUCKET_FILE)
+        runCatching { file.readText().trim().toInt().takeIf { it in 0..99 } }.getOrNull()
+            ?: Random.nextInt(100).also { runCatching { TelemetryStore.writeAtomically(file, it.toString()) } }
+    }
+
+    /** The settings in effect: the last good remote config (from disk at start), or the defaults. */
+    @Volatile var settings: TelemetrySettings = if (configUrl == null) TelemetrySettings() else
+        runCatching { configFile.takeIf { it.exists() }?.readText()?.let { RemoteTelemetryConfig.parse(it, target, bucket) } }.getOrNull()
+            ?: TelemetrySettings()
+        private set
+    private var lastConfigFetch = 0L
+
     private val store: TelemetryStore? = url?.let {
-        TelemetryStore(File(config.storageDir, QUEUE_DIR), config.maxQueueBytes, config.maxQueueAgeMs, clock)
+        val remote = settings.version != null
+        TelemetryStore(File(config.storageDir, QUEUE_DIR), if (remote) settings.queueMaxBytes else config.maxQueueBytes,
+            if (remote) settings.queueMaxAgeMs else config.maxQueueAgeMs, clock)
     }
     private val markerFile get() = File(config.storageDir, "call-marker.txt")
+    private val heldFile get() = File(config.storageDir, HELD_FILE)
+    private val launchFile get() = File(config.storageDir, LAUNCH_FILE)
 
     // Guarded by `this`.
     private var telemetryOk: Boolean? = null
@@ -77,17 +124,51 @@ class LtTelemetry internal constructor(
     /** The pending retry was set by the server (Retry-After); [flush] does not cut it short. */
     private var serverDelay = false
     private var uploadQueued = false
+    /** Released at the end of the next upload pass ([drain], the startup wait). */
+    private val passWaiters = mutableListOf<CountDownLatch>()
 
     init {
-        if (store != null) executor.execute { importLegacyQueue(); upload() } // What the last process could not send.
+        if (store != null) {
+            // The launch marker lives for STARTUP_WINDOW_MS: still there at the next start = that process died early.
+            val crashedAtLaunch = config.startupCrashWaitMs > 0 && launchFile.exists()
+            runCatching { TelemetryStore.writeAtomically(launchFile, clock().toString()) }
+            executor.schedule({ runCatching { launchFile.delete() } }, STARTUP_WINDOW_MS, TimeUnit.MILLISECONDS)
+            val firstPass = CountDownLatch(1).also { synchronized(this) { passWaiters += it } }
+            executor.execute { importLegacyQueue(); upload() } // What the last process could not send.
+            refreshConfig(0)
+            if (crashedAtLaunch) {
+                config.log("上次啟動後很快就結束，先送出遙測再繼續")
+                runCatching { firstPass.await(config.startupCrashWaitMs, TimeUnit.MILLISECONDS) }
+            }
+        }
     }
 
     /** Fire and forget: written to disk before it returns, sent in the background. Never throws. */
     fun send(records: List<TelemetryRecord>) {
         val store = store ?: return
-        if (records.isEmpty()) return
-        store.append(records)
+        val now = settings
+        if (!now.enabled || records.isEmpty()) return
+        val kept = records.filter { r ->
+            r.body != Telemetry.SDK_EVENT || r.attributes["label"] !in now.dropLabels || TelemetryStore.Lane.of(r) == TelemetryStore.Lane.CRITICAL
+        }.map { r -> now.version?.let { r.copy(attributes = r.attributes + (CONFIG_VERSION to it.toString())) } ?: r }
+        if (kept.isEmpty()) return
+        store.append(kept)
         schedule(now = false)
+    }
+
+    /**
+     * Fetches the remote config in the background unless the last fetch was less than [minIntervalMs] ago (the app:
+     * every call start with a short interval, coming to the foreground with 15 minutes). Sends `If-None-Match`, so an
+     * unchanged file costs a 304. What it changes applies from the next record on; queue limits from the next launch.
+     */
+    fun refreshConfig(minIntervalMs: Long) {
+        configUrl ?: return
+        synchronized(this) {
+            val now = clock()
+            if (lastConfigFetch != 0L && now - lastConfigFetch < minIntervalMs) return
+            lastConfigFetch = now
+        }
+        executor.execute { fetchConfig() }
     }
 
     /**
@@ -95,6 +176,41 @@ class LtTelemetry internal constructor(
      * but not a server's Retry-After.
      */
     fun flush() { if (store != null) schedule(now = true) }
+
+    /**
+     * Sends what is queued now and waits up to [timeoutMs] for that pass (blocking: call it from a worker, never the
+     * main thread). True when the queue is empty afterwards. False at once while the server's Retry-After runs.
+     */
+    fun drain(timeoutMs: Long): Boolean {
+        val store = store ?: return true
+        val latch = CountDownLatch(1)
+        synchronized(this) {
+            if (retry != null && serverDelay) return false
+            passWaiters += latch
+        }
+        schedule(now = true)
+        runCatching { latch.await(timeoutMs, TimeUnit.MILLISECONDS) }
+        return store.isEmpty
+    }
+
+    /**
+     * Records the app holds back until their call_id is final (lt-call-demo's outbox), kept on disk so a crash before
+     * that does not lose them: rewritten whenever the held set changes, empty clears it. [takeHeld] at the next launch
+     * returns them once.
+     */
+    fun writeHeld(records: List<TelemetryRecord>) {
+        if (store == null) return
+        runCatching {
+            if (records.isEmpty()) heldFile.delete()
+            else TelemetryStore.writeAtomically(heldFile, records.joinToString("\n") { TelemetryStore.encode(it) })
+        }
+    }
+    fun takeHeld(): List<TelemetryRecord> {
+        if (!heldFile.exists()) return emptyList()
+        val records = runCatching { heldFile.readLines().filter { it.isNotBlank() }.mapNotNull(TelemetryStore::decode) }.getOrDefault(emptyList())
+        runCatching { heldFile.delete() }
+        return records
+    }
 
     /** The on-disk call marker ([CallMarker]); null clears it. Survives the process. */
     fun writeCallMarker(text: String?) {
@@ -121,8 +237,16 @@ class LtTelemetry internal constructor(
 
     /** Sends batch after batch until the queue is empty or one fails; on the telemetry thread only. */
     private fun upload() {
+        try { uploadPass() } finally {
+            val waiters = synchronized(this) { passWaiters.toList().also { passWaiters.clear() } }
+            waiters.forEach { it.countDown() }
+        }
+    }
+
+    private fun uploadPass() {
         val store = store ?: return
         synchronized(this) { uploadQueued = false; if (retry != null) return }
+        if (!settings.enabled) return // Remote kill switch: the queue waits (until it expires).
         while (true) {
             val batch = store.next() ?: return
             val result = post(Telemetry.logsJson(batch.records, config.device, config.serviceName, observedEpochMs = clock()))
@@ -139,6 +263,7 @@ class LtTelemetry internal constructor(
                 retryable(result.status) -> {
                     store.release(batch)
                     backOff(result.retryAfterMs)
+                    runCatching { config.onBacklog() }
                     return
                 }
                 // A permanent rejection (bad token, bad payload) would block every later record, so that batch is dropped.
@@ -149,8 +274,10 @@ class LtTelemetry internal constructor(
 
     private fun backOff(retryAfterMs: Long?) = synchronized(this) {
         failures++
-        val delay = if (retryAfterMs != null) retryAfterMs.coerceIn(retryMs, MAX_RETRY_AFTER_MS)
-            else backoffDelay(failures, retryMs, maxRetryMs, jitter())
+        val remote = settings.takeIf { it.version != null }
+        val base = remote?.retryBaseMs ?: retryMs
+        val delay = if (retryAfterMs != null) retryAfterMs.coerceIn(base, MAX_RETRY_AFTER_MS)
+            else backoffDelay(failures, base, remote?.retryMaxMs ?: maxRetryMs, jitter())
         serverDelay = retryAfterMs != null
         retry = executor.schedule({ synchronized(this) { retry = null; serverDelay = false }; upload() }, delay, TimeUnit.MILLISECONDS)
     }
@@ -164,6 +291,32 @@ class LtTelemetry internal constructor(
     private fun droppedReport(dropped: Map<TelemetryStore.Drop, Int>) = Telemetry.appEvent(
         LABEL_TELEMETRY, "telemetry records dropped", REASON_DROPPED, clock(),
         extra = dropped.entries.associate { (reason, n) -> "dropped_${reason.code}" to n.toString() })
+
+    /** On the telemetry thread. Keeps the last good config on disk; a bad or missing file changes nothing. */
+    private fun fetchConfig() {
+        val target = configUrl ?: return
+        val result = runCatching {
+            val connection = URL(target).openConnection() as HttpURLConnection
+            try {
+                connection.connectTimeout = TIMEOUT_MS
+                connection.readTimeout = TIMEOUT_MS
+                config.headers().forEach { (k, v) -> connection.setRequestProperty(k, v) }
+                runCatching { etagFile.readText().trim() }.getOrNull()?.takeIf { it.isNotEmpty() && configFile.exists() }
+                    ?.let { connection.setRequestProperty("If-None-Match", it) }
+                val status = connection.responseCode
+                if (status != 200) return
+                val body = connection.inputStream.use { it.readBytes() }.takeIf { it.size <= MAX_CONFIG_BYTES }?.decodeToString() ?: return
+                body to connection.getHeaderField("ETag")
+            } finally { connection.disconnect() }
+        }.getOrNull() ?: return
+        val parsed = RemoteTelemetryConfig.parse(result.first, this.target, bucket) ?: run { config.log("遙測設定檔格式不符，沿用目前設定"); return }
+        runCatching {
+            TelemetryStore.writeAtomically(configFile, result.first)
+            if (result.second.isNullOrBlank()) etagFile.delete() else TelemetryStore.writeAtomically(etagFile, result.second!!)
+        }
+        if (parsed.version != settings.version) config.log("已套用遙測設定 v${parsed.version}")
+        settings = parsed
+    }
 
     /** Moves app_error / abnormal_exit left in the previous version's telemetry-durable.txt into the queue. */
     private fun importLegacyQueue() {
@@ -200,6 +353,17 @@ class LtTelemetry internal constructor(
         const val QUEUE_DIR = "telemetry-queue"
         /** Where versions before the disk queue kept app_error / abnormal_exit; imported once. */
         const val LEGACY_DURABLE_FILE = "telemetry-durable.txt"
+        const val HELD_FILE = "telemetry-held.txt"
+        const val CONFIG_PATH = "/config/telemetry.json"
+        const val CONFIG_FILE = "telemetry-config.json"
+        const val CONFIG_ETAG_FILE = "telemetry-config.etag"
+        const val BUCKET_FILE = "telemetry-bucket.txt"
+        /** Attribute on every record sent under a remote config: its `version`. */
+        const val CONFIG_VERSION = "config_version"
+        private const val MAX_CONFIG_BYTES = 64 * 1024
+        const val LAUNCH_FILE = "telemetry-launch.txt"
+        /** A process that ends within this long of starting counts as a crash at launch ([TelemetryConfig.startupCrashWaitMs]). */
+        const val STARTUP_WINDOW_MS = 5_000L
         const val LABEL_TELEMETRY = "telemetry"
         const val REASON_DROPPED = "dropped"
         private const val TIMEOUT_MS = 5_000

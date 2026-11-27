@@ -22,6 +22,10 @@ class LtTelemetryTest {
     private val statuses = CopyOnWriteArrayList<Int>()
     /** Retry-After values sent with the answers above, in the same order (null = none). */
     private val retryAfters = CopyOnWriteArrayList<String?>()
+    /** GET <base>/config/telemetry.json: the file served (null = 404) and the If-None-Match each request sent. */
+    @Volatile private var configBody: String? = null
+    @Volatile private var configEtag = "\"v1\""
+    private val configHits = CopyOnWriteArrayList<String?>()
     // Unit tests compile against android.jar, which has no com.sun.net.httpserver: a minimal HTTP/1.1 server instead.
     private val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
     init {
@@ -32,6 +36,17 @@ class LtTelemetryTest {
                     val input = s.getInputStream()
                     val headers = generateSequence { readLine(input) }.takeWhile { it.isNotEmpty() }.toList()
                     fun header(name: String) = headers.firstOrNull { it.startsWith("$name:", ignoreCase = true) }?.substringAfter(':')?.trim()
+                    if (headers.firstOrNull()?.startsWith("GET /config/telemetry.json") == true) {
+                        configHits += header("If-None-Match")
+                        val served = configBody
+                        val reply = when {
+                            served == null -> "HTTP/1.1 404 X\r\nContent-Length: 0\r\n"
+                            header("If-None-Match") == configEtag -> "HTTP/1.1 304 X\r\nETag: $configEtag\r\nContent-Length: 0\r\n"
+                            else -> "HTTP/1.1 200 X\r\nETag: $configEtag\r\nContent-Length: ${served.toByteArray().size}\r\n"
+                        }
+                        s.getOutputStream().write("${reply}Connection: close\r\n\r\n${if (reply.startsWith("HTTP/1.1 200")) served else ""}".toByteArray())
+                        return@use
+                    }
                     val body = ByteArray(header("Content-Length")?.toInt() ?: 0).also { var n = 0; while (n < it.size) n += input.read(it, n, it.size - n) }
                     hits += Hit(body.decodeToString(), header("Authorization"))
                     val status = if (statuses.isEmpty()) 200 else statuses.removeAt(0)
@@ -182,6 +197,90 @@ class LtTelemetryTest {
         assertNull(LtTelemetry.parseRetryAfter(null, 0))
         assertTrue(LtTelemetry.retryable(0) && LtTelemetry.retryable(429) && LtTelemetry.retryable(503))
         assertFalse(LtTelemetry.retryable(400) || LtTelemetry.retryable(401))
+    }
+
+    @Test fun heldRecordsSurviveTheProcessAndAreReturnedOnce() {
+        val held = listOf(event("held-1"), Telemetry.appError(AppError(ErrorDomain.RTC, "agora_error_17"), "joining", 1, 3L))
+        telemetry().writeHeld(held)
+        val next = telemetry()
+        assertEquals(held.map { it.body to it.atEpochMs }, next.takeHeld().map { it.body to it.atEpochMs })
+        assertTrue(next.takeHeld().isEmpty())
+        next.writeHeld(held); next.writeHeld(emptyList()) // Sent normally: cleared.
+        assertTrue(telemetry().takeHeld().isEmpty())
+    }
+
+    @Test fun drainSendsNowAndReportsWhetherTheQueueIsEmpty() {
+        val answers = CopyOnWriteArrayList(listOf(0, 0)) // Offline twice, then delivered.
+        val backlog = CopyOnWriteArrayList<Long>()
+        val t = LtTelemetry(TelemetryConfig(url, requireHttps = false, serviceName = "unit-test", device = device, storageDir = dir,
+            onBacklog = { backlog += System.currentTimeMillis() }),
+            retryMs = 60_000, maxRetryMs = 60_000, clock = System::currentTimeMillis, jitter = { 0.5 },
+            poster = { LtTelemetry.PostResult(if (answers.isEmpty()) 200 else answers.removeAt(0)) })
+        t.send(listOf(event("a")))
+        t.onWorker { }
+        assertEquals(1, backlog.size) // Left waiting: the app can schedule a job.
+        assertFalse(t.drain(5_000)) // Still offline.
+        assertTrue(t.drain(5_000))
+        assertTrue(t.drain(5_000)) // Nothing left.
+    }
+
+    @Test fun aProcessThatDiedAtLaunchMakesTheNextStartWaitForTheFirstSend() {
+        val logs = CopyOnWriteArrayList<String>()
+        val posted = java.util.concurrent.CountDownLatch(1)
+        fun start() = LtTelemetry(TelemetryConfig(url, requireHttps = false, serviceName = "unit-test", device = device, storageDir = dir,
+            log = { logs += it }, startupCrashWaitMs = 3_000),
+            retryMs = 50, maxRetryMs = 200, clock = System::currentTimeMillis, jitter = { 0.5 },
+            poster = { Thread.sleep(300); posted.countDown(); LtTelemetry.PostResult(200) })
+        start().send(listOf(Telemetry.appError(AppError(ErrorDomain.APP_EXIT, "exit_crash", fatal = true), "idle", 1, 1L)))
+        // That process "died" within the launch window: its marker is still there.
+        assertTrue(File(dir, LtTelemetry.LAUNCH_FILE).exists())
+        start() // Blocks until its first pass sent the leftover record.
+        assertEquals(0, posted.count)
+        assertTrue(logs.any { it.contains("很快就結束") })
+    }
+
+    @Test fun remoteConfigIsFetchedCachedAndAppliedWithItsVersion() {
+        configBody = """{"schema":1,"version":4,"telemetry":{"drop_labels":["mic"],"batch_records":7}}"""
+        val t = telemetry()
+        eventually("config applied") { t.settings.version == 4 }
+        assertEquals(7, t.settings.batchRecords)
+        t.send(listOf(Telemetry.appEvent("mic", "x", "silenced", 1L), event("kept"),
+            Telemetry.appError(AppError(ErrorDomain.AUDIO, "x"), "idle", 1, 2L)))
+        eventually("two posts") { hits.size == 2 }
+        val bodies = hits.joinToString { it.body }
+        assertFalse(bodies.contains("\"silenced\"")) // Dropped by label.
+        assertTrue(bodies.contains("\"kept\"") && bodies.contains("app_error"))
+        assertTrue(hits.all { it.body.contains(""""config_version","value":{"stringValue":"4"}""") })
+        // Next launch: the cached file applies at once, and the fetch sends its ETag (answered 304).
+        configBody = """{"schema":1,"version":5}"""
+        val next = telemetry()
+        assertEquals(4, next.settings.version)
+        eventually("conditional fetch") { configHits.contains("\"v1\"") }
+        assertEquals(4, next.settings.version)
+    }
+
+    @Test fun refreshIsThrottledAndABadFileKeepsTheLastGoodSettings() {
+        configBody = """{"schema":1,"version":1}"""
+        val t = telemetry()
+        eventually("first fetch") { t.settings.version == 1 }
+        t.refreshConfig(60_000) // Too soon.
+        t.onWorker { }
+        assertEquals(1, configHits.size)
+        configBody = "{broken"; configEtag = "\"v2\""
+        t.refreshConfig(0)
+        t.onWorker { }
+        assertEquals(2, configHits.size)
+        assertEquals(1, t.settings.version)
+    }
+
+    @Test fun theKillSwitchStopsSendingAndUploading() {
+        configBody = """{"schema":1,"version":9,"telemetry":{"enabled":false}}"""
+        val t = telemetry()
+        eventually("disabled") { !t.settings.enabled }
+        t.send(listOf(event("x")))
+        t.onWorker { }
+        Thread.sleep(100)
+        assertTrue(hits.isEmpty())
     }
 
     @Test fun offWithoutUrlOrWithHttpWhenHttpsIsRequired() {

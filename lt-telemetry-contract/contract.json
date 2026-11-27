@@ -45,7 +45,7 @@
     "common": ["platform", "os_version", "app_version", "sdk_version", "device_model", "device_brand", "log.record.uid"],
     "identity": ["call_id", "channel", "leg_uid", "peer_uid", "engine", "role", "server_region", "profile",
                  "test_run_id", "case_id", "test_role", "test_group", "env_ok", "test_scenario",
-                 "proxy", "transport", "relay", "ice_policy"],
+                 "proxy", "transport", "relay", "ice_policy", "call_id_final", "config_version"],
     "trace": ["setup_id", "clock_offset_ms", "relay_recv_ts"],
     "quality_second": ["tx_audio_kbps", "rx_audio_kbps", "tx_loss_pct", "rx_loss_pct", "freeze_rate_pct", "conceal_pct", "mos",
                        "rtt_ms", "jitter_ms", "e2e_delay_ms", "jitter_buffer_ms", "candidate_type", "relay_protocol", "codec",

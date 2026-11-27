@@ -185,7 +185,9 @@ module.exports = Object.freeze({
       "proxy",
       "transport",
       "relay",
-      "ice_policy"
+      "ice_policy",
+      "call_id_final",
+      "config_version"
     ],
     "trace": [
       "setup_id",
