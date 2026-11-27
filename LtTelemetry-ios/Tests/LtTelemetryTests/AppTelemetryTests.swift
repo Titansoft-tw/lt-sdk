@@ -18,12 +18,6 @@ private func attributes(_ record: [String: Any]) -> [String: String] {
     })
 }
 
-final class MemoryStore: TextStore {
-    var text: String?
-    func read() -> String? { text }
-    func write(_ text: String) { self.text = text }
-}
-
 @MainActor struct AppTelemetryTests {
     // TC-1 (AC-1): app_error carries its own severity; every existing record stays INFO and otherwise unchanged.
     @Test func tc1_appErrorIsErrorAndEveryOtherRecordStaysInfo() {
@@ -217,30 +211,8 @@ final class MemoryStore: TextStore {
     }
 
     // TC-12 (AC-8): a durable queue survives a failed send and a restart, sends once, and drops the oldest over its cap.
-    @Test func tc12_durableQueueSendsOnceAfterRestartAndDropsOldestOverCap() async {
-        let store = MemoryStore()
-        let record = Telemetry.appError(AppError(.api, "http_503", detail: "a=b&c\td\nline 中文"), stage: "idle", count: 1, atEpochMs: 7)
-        let first = DurableTelemetryQueue(store: store, cap: 3)
-        first.add([record])
-        #expect(await first.drain { _ in .retry } == false)
-        let restarted = DurableTelemetryQueue(store: store, cap: 3)
-        var sent: [TelemetryRecord] = []
-        #expect(await restarted.drain { sent += $0; return .sent })
-        #expect(sent == [record])
-        #expect(await DurableTelemetryQueue(store: store, cap: 3).drain { sent += $0; return .sent })
-        #expect(sent.count == 1)
-        let capped = DurableTelemetryQueue(store: store, cap: 3)
-        capped.add((1...5).map { TelemetryRecord(body: record.body, atEpochMs: Int64($0), attributes: record.attributes, severity: record.severity) })
-        #expect(capped.pending.map(\.atEpochMs) == [3, 4, 5])
-        #expect(await capped.drain { _ in .rejected })
-        #expect(capped.pending.isEmpty)
-        store.text = "garbage"
-        #expect(DurableTelemetryQueue(store: store, cap: 3).pending.isEmpty)
-        #expect(DurableTelemetryQueue.isDurable(record))
-        #expect(!DurableTelemetryQueue.isDurable(Telemetry.sdkEvent(leg, label: "app_state", event: "x", reason: "background", atEpochMs: 1)))
-    }
+    // TC-12 (AC-8), the durable queue: now every record goes through TelemetryStore (TelemetryStoreTests, LtTelemetryTests).
 
-    // TC-10 (AC-7), the marker part.
     @Test func tc10_callMarkerRoundTrips() {
         let marker = CallMarker(callId: "c-1", channel: "room 1&2", user: "1001", engine: "agora", sdkVersion: "agora-4.6.0", startedAtMs: 42)
         #expect(CallMarker.decode(marker.encode()) == marker)

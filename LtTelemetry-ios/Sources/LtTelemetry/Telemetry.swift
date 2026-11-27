@@ -354,17 +354,22 @@ public enum Telemetry {
 
     /// OTLP/HTTP JSON for `/v1/logs`. Device fields go on every record because the views read log attributes;
     /// sdk_version comes from the record (the engine that produced it) and is left out when there is none.
-    public static func logsJson(_ records: [TelemetryRecord], device: StaticDevice, serviceName: String) -> [String: Any] {
+    /// `observedEpochMs`: when the batch leaves the device (OTLP observedTimeUnixNano); `timeUnixNano` stays when the record
+    /// was made, so a record delivered late (after an outage or a crash) shows how late it was.
+    public static func logsJson(_ records: [TelemetryRecord], device: StaticDevice, serviceName: String,
+                                observedEpochMs: Int64? = nil) -> [String: Any] {
         func string(_ value: String) -> [String: Any] { ["stringValue": value] }
         var common = ["platform": device.platform, "os_version": device.osVersion, "app_version": device.appVersion]
         if !device.model.isEmpty { common["device_model"] = device.model }
         if !device.brand.isEmpty { common["device_brand"] = device.brand }
         let logs: [[String: Any]] = records.map { record in
             let attributes = record.attributes.merging(common) { own, _ in own }.filter { !isSecretAttribute($0.key) }
-            return [
+            var log: [String: Any] = [
                 "timeUnixNano": "\(record.atEpochMs)000000", "severityText": record.severity, "body": string(record.body),
                 "attributes": attributes.sorted { $0.key < $1.key }.map { ["key": $0.key, "value": string($0.value)] as [String: Any] },
             ]
+            if let observedEpochMs { log["observedTimeUnixNano"] = "\(observedEpochMs)000000" }
+            return log
         }
         return ["resourceLogs": [[
             "resource": ["attributes": [["key": "service.name", "value": string(serviceName)]]],
