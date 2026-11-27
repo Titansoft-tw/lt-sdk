@@ -6,3 +6,5 @@ dependencyResolutionManagement {
 rootProject.name = "lt-sdk"
 include(":lt-device-info-android")
 include(":lt-telemetry-android")
+include(":lt-error-guard-android")
+include(":lt-error-guard-sentry-android")

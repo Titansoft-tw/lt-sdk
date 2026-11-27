@@ -1,0 +1,35 @@
+{
+  "about": "Rules every implementation must reject (validate.js, GuardRules.parse on Android and iOS). error is a substring of validate.js's message only.",
+  "cases": [
+    { "name": "not an object", "rules": [], "error": "must be an object" },
+    { "name": "wrong version", "rules": { "version": 2, "rules": [] }, "error": "version" },
+    { "name": "missing rules", "rules": { "version": 1 }, "error": "rules" },
+    { "name": "unknown top-level key", "rules": { "version": 1, "rules": [], "defaultAction": "keep" }, "error": "defaultAction" },
+    { "name": "budget below 1", "rules": { "version": 1, "sessionBudget": { "maxEvents": 0 }, "rules": [] }, "error": "maxEvents" },
+    { "name": "budget not an integer", "rules": { "version": 1, "sessionBudget": { "maxEvents": 1.5 }, "rules": [] }, "error": "maxEvents" },
+    { "name": "duplicate id", "rules": { "version": 1, "rules": [
+      { "id": "a", "match": {}, "action": "keep" }, { "id": "a", "match": {}, "action": "keep" } ] }, "error": "duplicate" },
+    { "name": "reserved id budget", "rules": { "version": 1, "rules": [{ "id": "budget", "match": {}, "action": "keep" }] }, "error": "budget" },
+    { "name": "bad id characters", "rules": { "version": 1, "rules": [{ "id": "Net IO", "match": {}, "action": "keep" }] }, "error": "id" },
+    { "name": "unknown action", "rules": { "version": 1, "rules": [{ "id": "a", "match": {}, "action": "ignore" }] }, "error": "action" },
+    { "name": "sample without rate", "rules": { "version": 1, "rules": [
+      { "id": "a", "match": {}, "action": "sample", "domain": "api", "code": "x" }] }, "error": "rate" },
+    { "name": "rate above 1", "rules": { "version": 1, "rules": [
+      { "id": "a", "match": {}, "action": "sample", "rate": 1.5, "domain": "api", "code": "x" }] }, "error": "rate" },
+    { "name": "rate on a non-sample rule", "rules": { "version": 1, "rules": [
+      { "id": "a", "match": {}, "action": "drop", "rate": 0.5, "domain": "api", "code": "x" }] }, "error": "rate" },
+    { "name": "drop without domain", "rules": { "version": 1, "rules": [{ "id": "a", "match": {}, "action": "drop", "code": "x" }] }, "error": "domain" },
+    { "name": "code not groupable", "rules": { "version": 1, "rules": [
+      { "id": "a", "match": {}, "action": "drop", "domain": "api", "code": "HTTP 503" }] }, "error": "code" },
+    { "name": "keep with a code", "rules": { "version": 1, "rules": [{ "id": "a", "match": {}, "action": "keep", "code": "x" }] }, "error": "code" },
+    { "name": "missing match", "rules": { "version": 1, "rules": [{ "id": "a", "action": "keep" }] }, "error": "match" },
+    { "name": "unknown match key", "rules": { "version": 1, "rules": [{ "id": "a", "match": { "exception": ["X"] }, "action": "keep" }] }, "error": "exception" },
+    { "name": "empty glob list", "rules": { "version": 1, "rules": [{ "id": "a", "match": { "message": [] }, "action": "keep" }] }, "error": "message" },
+    { "name": "blank glob", "rules": { "version": 1, "rules": [{ "id": "a", "match": { "exceptionType": [""] }, "action": "keep" }] }, "error": "exceptionType" },
+    { "name": "glob not a string", "rules": { "version": 1, "rules": [{ "id": "a", "match": { "exceptionType": [1] }, "action": "keep" }] }, "error": "exceptionType" },
+    { "name": "level fatal (crashes are always kept)", "rules": { "version": 1, "rules": [{ "id": "a", "match": { "level": ["fatal"] }, "action": "keep" }] }, "error": "level" },
+    { "name": "inApp not a boolean", "rules": { "version": 1, "rules": [{ "id": "a", "match": { "inApp": "no" }, "action": "keep" }] }, "error": "inApp" },
+    { "name": "empty tags", "rules": { "version": 1, "rules": [{ "id": "a", "match": { "tags": {} }, "action": "keep" }] }, "error": "tags" },
+    { "name": "unknown rule key", "rules": { "version": 1, "rules": [{ "id": "a", "match": {}, "action": "keep", "note": "x" }] }, "error": "note" }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Titansoft-tw/lt-sdk/lt-error-guard-spec/rules.schema.json",
+  "title": "lt-error-guard rules",
+  "description": "Which handled error events the guard keeps. Crashes (unhandled or level fatal) are always kept. validate.js checks the same rules and also rejects duplicate ids.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "rules"],
+  "properties": {
+    "version": { "const": 1 },
+    "sessionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxEvents"],
+      "properties": { "maxEvents": { "type": "integer", "minimum": 1, "description": "Handled events kept per session; later ones are dropped as rule \"budget\"." } }
+    },
+    "rules": { "type": "array", "items": { "$ref": "#/$defs/rule" } }
+  },
+  "$defs": {
+    "globs": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "code": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "match", "action"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9_-]+$", "not": { "const": "budget" } },
+        "match": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "All conditions must hold; an empty match covers every handled event.",
+          "properties": {
+            "exceptionType": { "$ref": "#/$defs/globs", "description": "Any exception's module.type (iOS NSError: the domain); * and ?, case-sensitive." },
+            "message": { "$ref": "#/$defs/globs", "description": "The message or any exception value; * and ?, case-insensitive." },
+            "inApp": { "type": "boolean", "description": "false: has frames but none of the app's own; true: at least one app frame." },
+            "level": { "type": "array", "minItems": 1, "items": { "enum": ["error", "warning", "info", "debug"] } },
+            "tags": { "type": "object", "minProperties": 1, "additionalProperties": { "$ref": "#/$defs/globs" } }
+          }
+        },
+        "action": { "enum": ["keep", "drop", "sample", "dedupe"] },
+        "rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "domain": { "$ref": "#/$defs/code" },
+        "code": { "$ref": "#/$defs/code" }
+      },
+      "allOf": [
+        { "if": { "properties": { "action": { "const": "sample" } } }, "then": { "required": ["rate"] }, "else": { "not": { "required": ["rate"] } } },
+        { "if": { "properties": { "action": { "const": "keep" } } }, "then": { "not": { "anyOf": [{ "required": ["domain"] }, { "required": ["code"] }] } }, "else": { "required": ["domain", "code"] } }
+      ]
+    }
+  }
+}

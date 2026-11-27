@@ -1,0 +1,203 @@
+{
+  "about": "Shared by the Android and iOS tests. A step's event fields default to: exceptionTypes [], messages [], frames 0, inAppFrames 0, level \"error\", tags {}, crashed false, fingerprint \"\"; random (the sample draw) defaults to 0.5. expect.rule null = no rule decided (crash or nothing matched). An endSession step lists what endSession() returns (counts above 1). tallies: every suppression count at the end; sink: every sink call in order.",
+  "cases": [
+    {
+      "name": "a crash is always kept, even when a drop rule matches",
+      "rules": { "version": 1, "rules": [{ "id": "all", "match": {}, "action": "drop", "domain": "telemetry", "code": "dropped" }] },
+      "steps": [
+        { "event": { "crashed": true, "exceptionTypes": ["java.lang.NullPointerException"] }, "expect": { "keep": true, "rule": null } },
+        { "event": { "level": "fatal" }, "expect": { "keep": true, "rule": null } },
+        { "event": { "messages": ["handled"] }, "expect": { "keep": false, "rule": "all" } }
+      ],
+      "tallies": [{ "rule": "all", "domain": "telemetry", "code": "dropped", "count": 1 }],
+      "sink": [{ "rule": "all", "domain": "telemetry", "code": "dropped", "count": 1 }]
+    },
+    {
+      "name": "the first matching rule wins; nothing matched is kept",
+      "rules": { "version": 1, "rules": [
+        { "id": "mine", "match": { "exceptionType": ["com.app.*"] }, "action": "keep" },
+        { "id": "rest", "match": { "exceptionType": ["*"] }, "action": "drop", "domain": "api", "code": "other" }
+      ] },
+      "steps": [
+        { "event": { "exceptionTypes": ["com.app.LoginFailed"] }, "expect": { "keep": true, "rule": "mine" } },
+        { "event": { "exceptionTypes": ["java.lang.IllegalStateException"] }, "expect": { "keep": false, "rule": "rest" } },
+        { "event": { "messages": ["no exception at all"] }, "expect": { "keep": true, "rule": null } }
+      ]
+    },
+    {
+      "name": "exceptionType: any exception in the chain, case-sensitive, * and ?",
+      "rules": { "version": 1, "rules": [
+        { "id": "net", "match": { "exceptionType": ["java.net.*Exception"] }, "action": "drop", "domain": "api", "code": "http_network" },
+        { "id": "one-char", "match": { "exceptionType": ["a?c"] }, "action": "drop", "domain": "api", "code": "x" }
+      ] },
+      "steps": [
+        { "event": { "exceptionTypes": ["java.lang.RuntimeException", "java.net.UnknownHostException"] }, "expect": { "keep": false, "rule": "net" } },
+        { "event": { "exceptionTypes": ["JAVA.NET.UnknownHostException"] }, "expect": { "keep": true, "rule": null } },
+        { "event": { "exceptionTypes": ["java.net.UnknownHost"] }, "expect": { "keep": true, "rule": null } },
+        { "event": { "exceptionTypes": ["abc"] }, "expect": { "keep": false, "rule": "one-char" } },
+        { "event": { "exceptionTypes": ["ac"] }, "expect": { "keep": true, "rule": null } },
+        { "event": { "exceptionTypes": ["abbc"] }, "expect": { "keep": true, "rule": null } }
+      ]
+    },
+    {
+      "name": "message: case-insensitive, matches the message or any exception value, regex characters are literal",
+      "rules": { "version": 1, "rules": [
+        { "id": "fcm", "match": { "message": ["*service_not_available*"] }, "action": "drop", "domain": "push", "code": "fcm_unavailable" },
+        { "id": "literal", "match": { "message": ["timeout (.*)"] }, "action": "drop", "domain": "api", "code": "x" }
+      ] },
+      "steps": [
+        { "event": { "messages": ["Push setup", "java.io.IOException: SERVICE_NOT_AVAILABLE"] }, "expect": { "keep": false, "rule": "fcm" } },
+        { "event": { "messages": ["timeout (.*)"] }, "expect": { "keep": false, "rule": "literal" } },
+        { "event": { "messages": ["timeout (5s)"] }, "expect": { "keep": true, "rule": null } }
+      ]
+    },
+    {
+      "name": "inApp false: frames but none of the app's own; no frames never counts as third party",
+      "rules": { "version": 1, "rules": [{ "id": "third", "match": { "inApp": false }, "action": "drop", "domain": "telemetry", "code": "third_party_error" }] },
+      "steps": [
+        { "event": { "frames": 5, "inAppFrames": 0 }, "expect": { "keep": false, "rule": "third" } },
+        { "event": { "frames": 5, "inAppFrames": 2 }, "expect": { "keep": true, "rule": null } },
+        { "event": { "frames": 0, "inAppFrames": 0 }, "expect": { "keep": true, "rule": null } }
+      ]
+    },
+    {
+      "name": "inApp true: at least one app frame",
+      "rules": { "version": 1, "rules": [{ "id": "mine", "match": { "inApp": true }, "action": "drop", "domain": "api", "code": "x" }] },
+      "steps": [
+        { "event": { "frames": 3, "inAppFrames": 1 }, "expect": { "keep": false, "rule": "mine" } },
+        { "event": { "frames": 3, "inAppFrames": 0 }, "expect": { "keep": true, "rule": null } }
+      ]
+    },
+    {
+      "name": "conditions are ANDed; a missing tag does not match; tag values are globs",
+      "rules": { "version": 1, "rules": [
+        { "id": "no-gms", "match": { "level": ["warning"], "tags": { "gms": ["miss*"] } }, "action": "drop", "domain": "push", "code": "gms_missing" }
+      ] },
+      "steps": [
+        { "event": { "level": "warning", "tags": { "gms": "missing" } }, "expect": { "keep": false, "rule": "no-gms" } },
+        { "event": { "level": "error", "tags": { "gms": "missing" } }, "expect": { "keep": true, "rule": null } },
+        { "event": { "level": "warning" }, "expect": { "keep": true, "rule": null } },
+        { "event": { "level": "warning", "tags": { "gms": "present" } }, "expect": { "keep": true, "rule": null } }
+      ]
+    },
+    {
+      "name": "dedupe: the first event per fingerprint and session is kept; endSession reports totals and resets",
+      "rules": { "version": 1, "rules": [{ "id": "net", "match": { "exceptionType": ["java.net.*"] }, "action": "dedupe", "domain": "api", "code": "http_network" }] },
+      "steps": [
+        { "event": { "exceptionTypes": ["java.net.UnknownHostException"], "fingerprint": "A" }, "expect": { "keep": true, "rule": "net" } },
+        { "event": { "exceptionTypes": ["java.net.UnknownHostException"], "fingerprint": "A" }, "expect": { "keep": false, "rule": "net" } },
+        { "event": { "exceptionTypes": ["java.net.ConnectException"], "fingerprint": "B" }, "expect": { "keep": true, "rule": "net" } },
+        { "event": { "exceptionTypes": ["java.net.UnknownHostException"], "fingerprint": "A" }, "expect": { "keep": false, "rule": "net" } },
+        { "endSession": [{ "rule": "net", "domain": "api", "code": "http_network", "count": 2 }] },
+        { "event": { "exceptionTypes": ["java.net.UnknownHostException"], "fingerprint": "A" }, "expect": { "keep": true, "rule": "net" } },
+        { "event": { "exceptionTypes": ["java.net.UnknownHostException"], "fingerprint": "A" }, "expect": { "keep": false, "rule": "net" } },
+        { "endSession": [] }
+      ],
+      "tallies": [],
+      "sink": [
+        { "rule": "net", "domain": "api", "code": "http_network", "count": 1 },
+        { "rule": "net", "domain": "api", "code": "http_network", "count": 1 }
+      ]
+    },
+    {
+      "name": "dedupe without a fingerprint falls back to the first exception type, then the first message",
+      "rules": { "version": 1, "rules": [{ "id": "all", "match": {}, "action": "dedupe", "domain": "api", "code": "x" }] },
+      "steps": [
+        { "event": { "exceptionTypes": ["X", "Z"] }, "expect": { "keep": true, "rule": "all" } },
+        { "event": { "exceptionTypes": ["X"] }, "expect": { "keep": false, "rule": "all" } },
+        { "event": { "exceptionTypes": ["Y"] }, "expect": { "keep": true, "rule": "all" } },
+        { "event": { "messages": ["m1"] }, "expect": { "keep": true, "rule": "all" } },
+        { "event": { "messages": ["m1", "other"] }, "expect": { "keep": false, "rule": "all" } },
+        { "event": {}, "expect": { "keep": true, "rule": "all" } },
+        { "event": {}, "expect": { "keep": false, "rule": "all" } }
+      ],
+      "tallies": [{ "rule": "all", "domain": "api", "code": "x", "count": 3 }]
+    },
+    {
+      "name": "dedupe keys are per rule: the same fingerprint under another rule is new",
+      "rules": { "version": 1, "rules": [
+        { "id": "a", "match": { "level": ["warning"] }, "action": "dedupe", "domain": "api", "code": "x" },
+        { "id": "b", "match": {}, "action": "dedupe", "domain": "api", "code": "x" }
+      ] },
+      "steps": [
+        { "event": { "level": "warning", "fingerprint": "F" }, "expect": { "keep": true, "rule": "a" } },
+        { "event": { "level": "error", "fingerprint": "F" }, "expect": { "keep": true, "rule": "b" } },
+        { "event": { "level": "error", "fingerprint": "F" }, "expect": { "keep": false, "rule": "b" } }
+      ],
+      "tallies": [{ "rule": "b", "domain": "api", "code": "x", "count": 1 }]
+    },
+    {
+      "name": "sample keeps an event when the draw is below the rate",
+      "rules": { "version": 1, "rules": [
+        { "id": "quarter", "match": { "level": ["warning"] }, "action": "sample", "rate": 0.25, "domain": "push", "code": "s" },
+        { "id": "never", "match": { "level": ["info"] }, "action": "sample", "rate": 0, "domain": "push", "code": "s0" },
+        { "id": "always", "match": { "level": ["debug"] }, "action": "sample", "rate": 1, "domain": "push", "code": "s1" }
+      ] },
+      "steps": [
+        { "event": { "level": "warning" }, "random": 0.1, "expect": { "keep": true, "rule": "quarter" } },
+        { "event": { "level": "warning" }, "random": 0.25, "expect": { "keep": false, "rule": "quarter" } },
+        { "event": { "level": "warning" }, "random": 0.9, "expect": { "keep": false, "rule": "quarter" } },
+        { "event": { "level": "info" }, "random": 0.0, "expect": { "keep": false, "rule": "never" } },
+        { "event": { "level": "debug" }, "random": 0.999, "expect": { "keep": true, "rule": "always" } }
+      ],
+      "tallies": [
+        { "rule": "quarter", "domain": "push", "code": "s", "count": 2 },
+        { "rule": "never", "domain": "push", "code": "s0", "count": 1 }
+      ]
+    },
+    {
+      "name": "the session budget caps kept handled events; crashes do not count; dedupe decides before the budget",
+      "rules": { "version": 1, "sessionBudget": { "maxEvents": 2 }, "rules": [
+        { "id": "net", "match": { "exceptionType": ["java.net.*"] }, "action": "dedupe", "domain": "api", "code": "http_network" }
+      ] },
+      "steps": [
+        { "event": { "messages": ["one"] }, "expect": { "keep": true, "rule": null } },
+        { "event": { "exceptionTypes": ["java.net.UnknownHostException"], "fingerprint": "A" }, "expect": { "keep": true, "rule": "net" } },
+        { "event": { "messages": ["three"] }, "expect": { "keep": false, "rule": "budget" } },
+        { "event": { "crashed": true }, "expect": { "keep": true, "rule": null } },
+        { "event": { "exceptionTypes": ["java.net.UnknownHostException"], "fingerprint": "A" }, "expect": { "keep": false, "rule": "net" } },
+        { "event": { "exceptionTypes": ["java.net.UnknownHostException"], "fingerprint": "B" }, "expect": { "keep": false, "rule": "budget" } },
+        { "event": { "exceptionTypes": ["java.net.UnknownHostException"], "fingerprint": "B" }, "expect": { "keep": false, "rule": "net" } },
+        { "endSession": [
+          { "rule": "budget", "domain": "telemetry", "code": "error_budget_exceeded", "count": 2 },
+          { "rule": "net", "domain": "api", "code": "http_network", "count": 2 }
+        ] },
+        { "event": { "messages": ["new session"] }, "expect": { "keep": true, "rule": null } }
+      ],
+      "sink": [
+        { "rule": "budget", "domain": "telemetry", "code": "error_budget_exceeded", "count": 1 },
+        { "rule": "net", "domain": "api", "code": "http_network", "count": 1 }
+      ]
+    },
+    {
+      "name": "a keep rule is still subject to the budget",
+      "rules": { "version": 1, "sessionBudget": { "maxEvents": 1 }, "rules": [{ "id": "mine", "match": {}, "action": "keep" }] },
+      "steps": [
+        { "event": {}, "expect": { "keep": true, "rule": "mine" } },
+        { "event": {}, "expect": { "keep": false, "rule": "budget" } }
+      ]
+    },
+    {
+      "name": "the default rules: network, FCM, GMS and third-party-only errors are deduplicated",
+      "rules": "default",
+      "steps": [
+        { "event": { "exceptionTypes": ["java.net.UnknownHostException"], "fingerprint": "n", "frames": 4, "inAppFrames": 1 }, "expect": { "keep": true, "rule": "net-io" } },
+        { "event": { "exceptionTypes": ["java.net.UnknownHostException"], "fingerprint": "n", "frames": 4, "inAppFrames": 1 }, "expect": { "keep": false, "rule": "net-io" } },
+        { "event": { "exceptionTypes": ["javax.net.ssl.SSLHandshakeException"], "fingerprint": "n2" }, "expect": { "keep": true, "rule": "net-io" } },
+        { "event": { "exceptionTypes": ["NSURLErrorDomain"], "fingerprint": "ios" }, "expect": { "keep": true, "rule": "net-io" } },
+        { "event": { "exceptionTypes": ["java.io.IOException"], "messages": ["SERVICE_NOT_AVAILABLE"], "fingerprint": "f" }, "expect": { "keep": true, "rule": "fcm-unavailable" } },
+        { "event": { "exceptionTypes": ["java.io.IOException"], "messages": ["SERVICE_NOT_AVAILABLE"], "fingerprint": "f" }, "expect": { "keep": false, "rule": "fcm-unavailable" } },
+        { "event": { "exceptionTypes": ["com.google.android.gms.common.api.ApiException"], "fingerprint": "g" }, "expect": { "keep": true, "rule": "gms-sdk" } },
+        { "event": { "exceptionTypes": ["io.agora.SomeError"], "frames": 6, "inAppFrames": 0, "fingerprint": "t" }, "expect": { "keep": true, "rule": "third-party-only" } },
+        { "event": { "exceptionTypes": ["io.agora.SomeError"], "frames": 6, "inAppFrames": 0, "fingerprint": "t" }, "expect": { "keep": false, "rule": "third-party-only" } },
+        { "event": { "exceptionTypes": ["com.app.CallFailed"], "frames": 6, "inAppFrames": 3 }, "expect": { "keep": true, "rule": null } },
+        { "event": { "exceptionTypes": ["com.app.CallFailed"], "frames": 6, "inAppFrames": 3 }, "expect": { "keep": true, "rule": null } }
+      ],
+      "tallies": [
+        { "rule": "net-io", "domain": "api", "code": "http_network", "count": 1 },
+        { "rule": "fcm-unavailable", "domain": "push", "code": "fcm_unavailable", "count": 1 },
+        { "rule": "third-party-only", "domain": "telemetry", "code": "third_party_error", "count": 1 }
+      ]
+    }
+  ]
+}
