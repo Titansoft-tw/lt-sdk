@@ -18,7 +18,7 @@ import java.util.UUID
  *
  * Thread-safe. Disk errors never throw: a record that cannot be written is counted as dropped.
  */
-class TelemetryStore(
+internal class TelemetryStore(
     private val dir: File,
     private val maxBytes: Long = DEFAULT_MAX_BYTES,
     private val maxAgeMs: Long = DEFAULT_MAX_AGE_MS,

@@ -36,3 +36,16 @@ the transport in `CallEnvironment.kt` (`AndroidCallEnvironment`). Left in the ap
 app's `Provider`), `CallIdAgreement` / `CallIdMessage`, `PathTrace.run`. Differences: `logsJson` takes the
 `serviceName`; there is no device-wide `sdk_version`, so a record without an engine (`app_start`) no longer sends a
 blank one. Not yet (plan §6): `CallTelemetry`, `setup_id`, clock offset, `onRecord`, `launched()`.
+
+## Data sent / stored on the device
+
+- **Sent**: the records the app passes to `send` (field list: `lt-telemetry-contract`). `quality_second` carries
+  network context — `carrier`, `country`, `exit_country`, `net_type*`, signal values — plus the static device fields
+  (OS, app version, model, manufacturer) on every batch. No URL or header is ever logged.
+- **Stored**: every record is written as plain text to `storageDir/telemetry-queue/` before it is sent. Defaults: 5 MB
+  and 7 days; the remote config can raise that to 20 MB / 720 h (30 days) without an app release. Also in
+  `storageDir`: the held records, the call marker, the cached config, a local rollout bucket (never sent).
+- **Turning it off**: the remote `enabled=false` is a server-side kill switch, not user consent — sending stops but
+  the queue stays on disk until it expires. There is no consent API yet: an app that needs consent must not create
+  `LtTelemetry` (or pass a blank `logsUrl`) until it has it, and delete `storageDir`'s `telemetry-*` files on opt-out.
+- **Threads**: the constructor and `send` do small synchronous file I/O on the caller's thread; `drain` blocks.

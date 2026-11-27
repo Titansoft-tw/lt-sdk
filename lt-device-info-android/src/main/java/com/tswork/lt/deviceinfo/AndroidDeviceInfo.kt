@@ -1,6 +1,7 @@
 package com.tswork.lt.deviceinfo
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.app.NotificationManager
 import android.app.usage.UsageStatsManager
@@ -73,7 +74,7 @@ class AndroidDeviceInfo(
     @Volatile private var micSilenced: Boolean? = null
     private var recordingWatched = false
     /** API 29+: the system silences an app's recording when another app (e.g. a phone call) takes the microphone. */
-    private fun watchRecording() {
+    @Synchronized private fun watchRecording() {
         if (recordingWatched || Build.VERSION.SDK_INT < 29) return
         recordingWatched = true
         fun silenced(configs: List<AudioRecordingConfiguration>?) = configs?.takeIf { it.isNotEmpty() }?.any { it.isClientSilenced }
@@ -215,7 +216,7 @@ class AndroidDeviceInfo(
     }
     @Volatile private var display: Pair<Int, Int>? = null
     private var displayListening = false
-    private fun displayInfo(telephony: TelephonyManager?): Pair<Int, Int>? {
+    @Synchronized private fun displayInfo(telephony: TelephonyManager?): Pair<Int, Int>? {
         if (Build.VERSION.SDK_INT < 31 || telephony == null) return null
         if (!displayListening) {
             displayListening = true
@@ -227,9 +228,15 @@ class AndroidDeviceInfo(
         }
         return display
     }
-    /** The generation needs READ_PHONE_STATE; without it this is just "cellular". */
+    /** dataNetworkType needs READ_PHONE_STATE, or on API 33+ READ_BASIC_PHONE_STATE. */
+    private fun hasPhoneState(): Boolean {
+        fun granted(permission: String) = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        return granted(Manifest.permission.READ_PHONE_STATE) || (Build.VERSION.SDK_INT >= 33 && granted(Manifest.permission.READ_BASIC_PHONE_STATE))
+    }
+    /** The generation needs [hasPhoneState]; without it this is just "cellular". */
+    @SuppressLint("MissingPermission") // Checked by hasPhoneState() just above; lint cannot follow the helper.
     private fun cellularGeneration(telephony: TelephonyManager?): String {
-        if (telephony == null || ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) return "cellular"
+        if (telephony == null || !hasPhoneState()) return "cellular"
         return when (telephony.dataNetworkType) {
             TelephonyManager.NETWORK_TYPE_NR -> "5g"
             TelephonyManager.NETWORK_TYPE_LTE, TelephonyManager.NETWORK_TYPE_IWLAN -> "4g"

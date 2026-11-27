@@ -6,11 +6,13 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import java.util.Timer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.schedule
 import kotlin.math.pow
 import kotlin.random.Random
 
@@ -70,6 +72,10 @@ class LtTelemetry internal constructor(
     private val jitter: () -> Double,
     poster: ((String) -> PostResult)?,
 ) {
+    /**
+     * Blocking: reads and writes small files in [TelemetryConfig.storageDir], and after a crash at launch waits up to
+     * [TelemetryConfig.startupCrashWaitMs]. Create it once per process, off the main thread if StrictMode matters.
+     */
     constructor(config: TelemetryConfig) : this(config, RETRY_MS, MAX_RETRY_MS, System::currentTimeMillis, { Random.nextDouble() }, null)
 
     /** [status] 0 = no answer; [retryAfterMs] from the `Retry-After` header. */
@@ -90,6 +96,9 @@ class LtTelemetry internal constructor(
             config.configUrl == null -> logs.trimEnd('/').takeIf { it.endsWith("/v1/logs") }?.removeSuffix("/v1/logs")?.plus(CONFIG_PATH)
             config.configUrl.isBlank() -> null
             else -> config.configUrl.trim()
+        }?.takeIf {
+            // The fetch carries the same headers (the Bearer token), so it obeys requireHttps too.
+            (!config.requireHttps || it.startsWith("https://")).also { ok -> if (!ok) config.log("遙測設定網址不是 https，已關閉遠端設定") }
         }
     }
     private val configFile get() = File(config.storageDir, CONFIG_FILE)
@@ -132,7 +141,9 @@ class LtTelemetry internal constructor(
             // The launch marker lives for STARTUP_WINDOW_MS: still there at the next start = that process died early.
             val crashedAtLaunch = config.startupCrashWaitMs > 0 && launchFile.exists()
             runCatching { TelemetryStore.writeAtomically(launchFile, clock().toString()) }
-            executor.schedule({ runCatching { launchFile.delete() } }, STARTUP_WINDOW_MS, TimeUnit.MILLISECONDS)
+            // Own timer: on the telemetry thread a slow upload pass would delay it, and a later exit would look like a crash.
+            val launchTimer = Timer("lt-telemetry-launch", true)
+            launchTimer.schedule(STARTUP_WINDOW_MS) { runCatching { launchFile.delete() }; launchTimer.cancel() }
             val firstPass = CountDownLatch(1).also { synchronized(this) { passWaiters += it } }
             executor.execute { importLegacyQueue(); upload() } // What the last process could not send.
             refreshConfig(0)
@@ -143,7 +154,10 @@ class LtTelemetry internal constructor(
         }
     }
 
-    /** Fire and forget: written to disk before it returns, sent in the background. Never throws. */
+    /**
+     * Fire and forget: written to disk before it returns (a small synchronous file append on the caller's thread, so
+     * StrictMode flags it on the main thread), sent in the background. Never throws.
+     */
     fun send(records: List<TelemetryRecord>) {
         val store = store ?: return
         val now = settings
@@ -212,11 +226,12 @@ class LtTelemetry internal constructor(
         return records
     }
 
-    /** The on-disk call marker ([CallMarker]); null clears it. Survives the process. */
+    /** The on-disk call marker ([CallMarker]); null clears it. Survives the process. Never throws, like [writeHeld]. */
     fun writeCallMarker(text: String?) {
-        if (text == null) markerFile.delete() else TelemetryStore.writeAtomically(markerFile, text)
+        runCatching { if (text == null) markerFile.delete() else TelemetryStore.writeAtomically(markerFile, text) }
     }
-    fun readCallMarker(): String? = markerFile.takeIf { it.exists() }?.readText()
+    /** Null when there is none or it cannot be read. */
+    fun readCallMarker(): String? = runCatching { markerFile.takeIf { it.exists() }?.readText() }.getOrNull()
 
     /** Runs [block] after everything queued on the telemetry thread so far (tests). */
     internal fun <T> onWorker(block: () -> T): T = executor.submit<T> { block() }.get(10, TimeUnit.SECONDS)
@@ -350,20 +365,20 @@ class LtTelemetry internal constructor(
         const val MAX_RETRY_MS = 5 * 60_000L
         /** A server asking for longer than this is capped (a stuck header must not silence telemetry for days). */
         const val MAX_RETRY_AFTER_MS = 60 * 60_000L
-        const val QUEUE_DIR = "telemetry-queue"
+        internal const val QUEUE_DIR = "telemetry-queue"
         /** Where versions before the disk queue kept app_error / abnormal_exit; imported once. */
-        const val LEGACY_DURABLE_FILE = "telemetry-durable.txt"
-        const val HELD_FILE = "telemetry-held.txt"
-        const val CONFIG_PATH = "/config/telemetry.json"
-        const val CONFIG_FILE = "telemetry-config.json"
-        const val CONFIG_ETAG_FILE = "telemetry-config.etag"
-        const val BUCKET_FILE = "telemetry-bucket.txt"
+        internal const val LEGACY_DURABLE_FILE = "telemetry-durable.txt"
+        internal const val HELD_FILE = "telemetry-held.txt"
+        internal const val CONFIG_PATH = "/config/telemetry.json"
+        internal const val CONFIG_FILE = "telemetry-config.json"
+        internal const val CONFIG_ETAG_FILE = "telemetry-config.etag"
+        internal const val BUCKET_FILE = "telemetry-bucket.txt"
         /** Attribute on every record sent under a remote config: its `version`. */
         const val CONFIG_VERSION = "config_version"
         private const val MAX_CONFIG_BYTES = 64 * 1024
-        const val LAUNCH_FILE = "telemetry-launch.txt"
+        internal const val LAUNCH_FILE = "telemetry-launch.txt"
         /** A process that ends within this long of starting counts as a crash at launch ([TelemetryConfig.startupCrashWaitMs]). */
-        const val STARTUP_WINDOW_MS = 5_000L
+        internal const val STARTUP_WINDOW_MS = 5_000L
         const val LABEL_TELEMETRY = "telemetry"
         const val REASON_DROPPED = "dropped"
         private const val TIMEOUT_MS = 5_000

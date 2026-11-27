@@ -25,9 +25,9 @@ data class TelemetrySettings(
 )
 
 /** What the rules match on: `android` / `ios`, the app's version name, `debug` / `release`. */
-data class ConfigTarget(val platform: String, val appVersion: String, val build: String)
+internal data class ConfigTarget(val platform: String, val appVersion: String, val build: String)
 
-object RemoteTelemetryConfig {
+internal object RemoteTelemetryConfig {
     const val SCHEMA = 1
     const val MAX_DROP_LABELS = 50
 
