@@ -9,6 +9,7 @@ import UIKit
 import UserNotifications
 
 /// AVAudioSession notifications, already turned into names. `IOSDeviceInfo.onAudioSession` receives them on the main actor.
+/// Adding a case breaks callers' exhaustive `switch`, so it only ships in a major version.
 public enum AudioSessionEvent: Equatable, Sendable {
     /// An interruption began or ended. `reason` is the InterruptionReason name (default, builtInMicMuted,
     /// routeDisconnected, appWasSuspended, raw_<n>, none); `otherCallActive` = a call that is not the app's own
@@ -22,6 +23,8 @@ public enum AudioSessionEvent: Equatable, Sendable {
 
 /// Reads the device, network, audio route and power state on iOS. Only reads: sends nothing and needs no telemetry.
 /// Every reader is cheap enough to call once a second; unknown values are empty or nil.
+/// Create one per process: init turns on `UIDevice.isBatteryMonitoringEnabled` for the whole app (never turned off,
+/// other code may rely on it) and observes the audio session; deinit removes the observers and stops the path monitor.
 @MainActor public final class IOSDeviceInfo {
     /// Asked once per network (type + VPN) where the traffic exits (lt-call-demo: the relay's `GET /v1/whoami`).
     private let exitCountryLookup: (@Sendable () async -> String?)?
@@ -34,21 +37,34 @@ public enum AudioSessionEvent: Equatable, Sendable {
     private var notificationPermission: String?
     private let radios = CellularRadioSource()
     private let callObserver = CXCallObserver()
-    private lazy var pathMonitor: NWPathMonitor = {
-        let monitor = NWPathMonitor()
-        monitor.start(queue: DispatchQueue(label: "com.tswork.lt.deviceinfo.path"))
-        return monitor
-    }()
+    private let pathMonitor = NWPathMonitor()
+    /// Nil until the monitor's first update: `currentPath` read before it is not the real network.
+    private var path: NWPath?
+    // Unsafe only for deinit: it runs with no other reference left, and removeObserver is thread-safe.
+    nonisolated(unsafe) private var observers: [any NSObjectProtocol] = []
 
+    /// Call on the main actor, once per process.
+    /// - Parameters:
+    ///   - exitCountryLookup: asked once per network (type + VPN) for the country the traffic exits from; nil = never.
+    ///     Runs off the main actor; a lookup still running when the network changes again is cancelled.
+    ///   - ownCallUUID: the app's own CallKit call right now, read on each interruption, so it is not taken for another call.
     public init(exitCountryLookup: (@Sendable () async -> String?)? = nil, ownCallUUID: @escaping @MainActor () -> UUID? = { nil }) {
         self.exitCountryLookup = exitCountryLookup
         self.ownCallUUID = ownCallUUID
         UIDevice.current.isBatteryMonitoringEnabled = true
+        pathMonitor.pathUpdateHandler = { [weak self] path in MainActor.assumeIsolated { self?.path = path } }
+        pathMonitor.start(queue: .main)
         observeAudioSession()
-        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshNotificationPermission() }
-        }
+        })
         refreshNotificationPermission()
+    }
+
+    deinit {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        pathMonitor.cancel()
+        exitTask?.cancel()
     }
 
     public let staticDevice: StaticDevice = {
@@ -119,8 +135,9 @@ public enum AudioSessionEvent: Equatable, Sendable {
     // MARK: Network
 
     /// Network type (the data line on dual SIM), VPN, exit country and the expensive / low data flags.
+    /// All empty (unknown) until the path monitor's first update, which follows init almost at once.
     public func network() -> NetworkSnapshot {
-        let path = pathMonitor.currentPath
+        guard let path else { return NetworkSnapshot() }
         let net: String
         var radio = ""
         if path.status != .satisfied { net = "none" }
@@ -142,12 +159,16 @@ public enum AudioSessionEvent: Equatable, Sendable {
 
     private var exitCountry = ""
     private var exitKey: String?
+    private var exitTask: Task<Void, Never>?
     private func refreshExitCountry(_ key: String) {
         guard key != exitKey else { return }
         exitKey = key; exitCountry = ""
+        exitTask?.cancel()
         guard let lookup = exitCountryLookup else { return }
-        Task { @MainActor in
-            if let country = await lookup(), self.exitKey == key { self.exitCountry = country }
+        exitTask = Task { @MainActor [weak self] in
+            let country = await lookup()
+            guard let self, !Task.isCancelled, let country, self.exitKey == key else { return }
+            self.exitCountry = country
         }
     }
 
@@ -161,7 +182,7 @@ public enum AudioSessionEvent: Equatable, Sendable {
 
     private func observeAudioSession() {
         let center = NotificationCenter.default
-        center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+        observers.append(center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             let info = note.userInfo ?? [:]
             let began = (info[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init) == .began
             let reason = Self.interruptionReason((info[AVAudioSessionInterruptionReasonKey] as? UInt).flatMap(AVAudioSession.InterruptionReason.init))
@@ -175,8 +196,8 @@ public enum AudioSessionEvent: Equatable, Sendable {
                 self.interrupted = AudioInterruption.silences(began: began, reason: reason)
                 self.onAudioSession(.interruption(began: began, reason: reason, otherCallActive: self.otherCallActive(), detail: detail))
             }
-        }
-        center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
+        })
+        observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
             let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
             let reason = raw.flatMap(AVAudioSession.RouteChangeReason.init).map(Self.routeChangeReason) ?? "unknown"
             // Route and Bluetooth profile only: accessory names can carry the owner's name.
@@ -184,13 +205,13 @@ public enum AudioSessionEvent: Equatable, Sendable {
             let route = output.map { DeviceInfo.audioRoute(port: $0.portType.rawValue, name: nil) } ?? AudioRoute()
             let detail = "reason=\(reason) route=\(route.route.isEmpty ? "unknown" : route.route)" + (route.btProfile.isEmpty ? "" : " profile=\(route.btProfile)")
             MainActor.assumeIsolated { self?.onAudioSession(.routeChanged(detail: detail)) }
-        }
-        center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
+        })
+        observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.interrupted = false
                 self?.onAudioSession(.mediaServicesReset)
             }
-        }
+        })
     }
 
     /// A call (phone or another VoIP app) that is not this app's own CallKit call.
@@ -233,13 +254,16 @@ public enum AudioSessionEvent: Equatable, Sendable {
     /// A replacement waiting to be trusted: a new instance may fill its values asynchronously, and an empty first
     /// read would turn 5g into "cellular" for a tick. It is adopted only once it reports a radio.
     private var pending: CTTelephonyNetworkInfo?
+    // Unsafe only for deinit: it runs with no other reference left, and removeObserver is thread-safe.
+    nonisolated(unsafe) private var observer: (any NSObjectProtocol)?
 
     init() {
-        // Lives as long as its IOSDeviceInfo, usually the whole process.
-        NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        observer = NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.renew() }
         }
     }
+
+    deinit { observer.map(NotificationCenter.default.removeObserver) }
 
     func current() -> CTTelephonyNetworkInfo {
         if ContinuousClock.now - createdAt >= Self.maxAge { renew() }

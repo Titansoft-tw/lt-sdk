@@ -7,6 +7,18 @@ import Testing
     #expect(DeviceInfo.deviceModel("小明的 AirPods") == "AirPods")
     #expect(DeviceInfo.deviceModel("WH-1000XM5") == "WH-1000XM5")
     #expect(DeviceInfo.deviceModel(nil) == "")
+    // The owner sits anywhere and in any language: only the model survives.
+    #expect(DeviceInfo.deviceModel("AirPods de Juan") == "AirPods")
+    #expect(DeviceInfo.deviceModel("AirPods von Jan") == "AirPods")
+    #expect(DeviceInfo.deviceModel("太郎のAirPods") == "AirPods")
+    #expect(DeviceInfo.deviceModel("AirPods Pro – Jason") == "AirPods Pro")
+    #expect(DeviceInfo.deviceModel("Jason AirPods") == "AirPods")
+    #expect(DeviceInfo.deviceModel("James' AirPods Max") == "AirPods Max")
+    #expect(DeviceInfo.deviceModel("Jason's Beats Studio Pro") == "Beats Studio Pro")
+    #expect(DeviceInfo.deviceModel("Galaxy Buds2 Pro de Ana") == "Galaxy Buds2 Pro")
+    // Unrecognised accessories send nothing rather than a name.
+    #expect(DeviceInfo.deviceModel("Jason's Car") == "")
+    #expect(DeviceInfo.deviceModel("小明的耳機") == "")
 }
 
 @Test func audioPortsMapToContractRoutes() {

@@ -2,6 +2,7 @@ import Foundation
 
 /// Read once per process: these do not change while the app runs.
 public struct StaticDevice: Equatable, Sendable {
+    /// "ios"; the OS version ("17.4"); the app's CFBundleShortVersionString, empty when missing.
     public let platform: String, osVersion: String, appVersion: String
     /// Hardware model, e.g. "Apple iPhone14,2"; never the user-given device name.
     public let model: String
@@ -39,7 +40,7 @@ public struct NetworkSnapshot: Equatable, Sendable {
 public struct AudioRoute: Equatable, Sendable {
     /// speaker / earpiece / wired / bluetooth.
     public var route: String
-    /// Already passed through `DeviceInfo.deviceModel`; empty for the built-in speaker and receiver.
+    /// Already passed through `DeviceInfo.deviceModel`; empty for the built-in speaker and receiver and for unrecognised accessories.
     public var device: String
     /// hfp / a2dp / le_audio, only on bluetooth.
     public var btProfile: String
@@ -73,14 +74,21 @@ public enum VpnState {
 }
 
 public enum DeviceInfo {
-    /// Accessory names are user-editable and usually start with the owner ("小明的 AirPods",
-    /// "Jason's AirPods Pro"). Only what follows the possessive is kept, so the model survives
-    /// and the name does not leave the device.
+    /// Accessory names are user-editable and carry the owner's name in any language and position
+    /// ("小明的 AirPods", "AirPods de Juan", "AirPods Pro – Jason"). So nothing of the name is kept except a
+    /// recognised model; anything else is "" and the name never leaves the device.
+    // shortcut: known models only, so other accessories read as unknown; add a pattern when data shows a common one.
     public static func deviceModel(_ name: String?) -> String {
-        let model = (name ?? "").replacingOccurrences(of: "^.*(['’]s|的)\\s*", with: "", options: .regularExpression)
-        let printable = String(String.UnicodeScalarView(model.unicodeScalars.filter { $0.value >= 0x20 && $0.value != 0x7f }))
-        return String(printable.trimmingCharacters(in: .whitespaces).prefix(48))
+        guard let name, let match = name.range(of: modelPattern, options: .regularExpression) else { return "" }
+        return String(name[match])
     }
+
+    private static let modelPattern = [
+        "AirPods(?: Pro| Max)?(?: \\d)?",
+        "(?:Power)?[Bb]eats(?: (?:Studio|Solo|Fit|Flex|Pill|Pro|Buds\\+?|\\d))*",
+        "Galaxy Buds\\d?\\+?(?: (?:Pro|Live|FE|\\d))*",
+        "W[HF]-[0-9A-Z]{4,}",
+    ].map { "(?:\($0))" }.joined(separator: "|")
 
     /// `AVAudioSession.Port` raw value and port name of the current output -> route, accessory model, profile.
     public static func audioRoute(port: String, name: String?) -> AudioRoute {

@@ -2,22 +2,33 @@ import Foundation
 
 /// What the phone is doing, read once a second (`IOSDeviceInfo.deviceState()`) and, in full, once per call
 /// (`deviceSnapshot()`). Nil = this platform cannot tell; it is then not sent (never as 0).
+/// Fields marked "Android only" mirror the shared telemetry contract and are always nil on iOS.
 public struct DeviceState: Equatable, Sendable {
+    /// Battery level, 0–100.
     public var batteryPct: Int?
+    /// Charging or full.
     public var charging: Bool?
+    /// Low Power Mode (iOS) / Battery Saver (Android).
     public var powerSave: Bool?
     /// 0–3, see `Thermal`.
     public var thermal: Int?
+    /// Android only: Doze is on.
     public var doze: Bool?
+    /// Android only: the app is exempt from battery optimisation.
     public var batteryOptExempt: Bool?
+    /// Android only: background restricted by the user.
     public var bgRestricted: Bool?
+    /// Android only: the App Standby bucket name.
     public var standbyBucket: String?
-    /// granted / denied / undetermined.
+    /// Microphone permission: granted / denied / undetermined.
     public var micPerm: String?
+    /// Notification permission: granted / denied / undetermined.
     public var notifPerm: String?
+    /// Android only: full-screen intent permission, granted / denied.
     public var fullscreenIntentPerm: String?
     /// The system silenced the microphone (iOS: an audio session interruption is in progress).
     public var micSilenced: Bool?
+    /// Android only: a phone call is up (iOS reports that through `AudioSessionEvent.interruption`'s `otherCallActive`).
     public var phoneCall: Bool?
     public init(batteryPct: Int? = nil, charging: Bool? = nil, powerSave: Bool? = nil, thermal: Int? = nil, doze: Bool? = nil,
                 batteryOptExempt: Bool? = nil, bgRestricted: Bool? = nil, standbyBucket: String? = nil, micPerm: String? = nil,
@@ -37,6 +48,7 @@ public enum Thermal {
     public static func android(_ status: Int) -> Int? {
         switch status { case 0: 0; case 1, 2: 1; case 3: 2; case 4...6: 3; default: nil }
     }
+    /// Contract level -> event suffix (`thermal_<name>`); above 3 reads as critical.
     public static func name(_ level: Int) -> String {
         switch level { case 0: "nominal"; case 1: "fair"; case 2: "serious"; default: "critical" }
     }
@@ -53,7 +65,9 @@ public struct AppLaunchTracker: Sendable {
     private var everForeground = false
     private var pushes = 0
     public init() {}
+    /// Call when a scene becomes active, so a later push is not taken for a cold start.
     public mutating func foreground() { everForeground = true }
+    /// Call once per push with `IOSDeviceInfo.isForeground()`; returns an `AppLaunch` value.
     public mutating func classify(foreground: Bool?) -> String {
         let first = pushes == 0
         pushes += 1
