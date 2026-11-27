@@ -79,6 +79,17 @@ private final class Box: @unchecked Sendable { var guardian: ErrorGuard?; var se
     }
 }
 
+@Test func updateRulesKeepsTheSessionAndStillProtectsCrashes() throws {
+    let guardian = ErrorGuard(rules: try GuardRules.parse(net))
+    let e = GuardEvent(exceptionTypes: ["java.net.ConnectException"])
+    #expect(guardian.decide(e).keep)
+    guardian.updateRules(try GuardRules.parse(#"{"version": 1, "rules": [{"id": "net", "match": {}, "action": "dedupe", "domain": "api", "code": "http_network"}]}"#))
+    #expect(!guardian.decide(e).keep)
+    guardian.updateRules(try GuardRules.parse(#"{"version": 1, "rules": [{"id": "all", "match": {}, "action": "drop", "domain": "api", "code": "x"}]}"#))
+    #expect(guardian.decide(GuardEvent(crashed: true)).keep)
+    #expect(guardian.tallies() == [Suppressed(rule: "net", domain: "api", code: "http_network", count: 1)])
+}
+
 @Test func theDefaultSampleDrawIsInRange() throws {
     let guardian = ErrorGuard(rules: try GuardRules.parse(
         #"{"version": 1, "rules": [{"id": "half", "match": {}, "action": "sample", "rate": 0.5, "domain": "api", "code": "x"}]}"#))

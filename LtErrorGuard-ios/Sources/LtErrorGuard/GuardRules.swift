@@ -86,7 +86,7 @@ private func isCode(_ s: String, dash: Bool = false) -> Bool {
 }
 private let levels: Set<String> = ["error", "warning", "info", "debug"]
 
-private struct Parser {
+struct Parser {
     var problems: [String] = []
 
     /// JSONSerialization gives booleans as NSNumber too; tell them apart.

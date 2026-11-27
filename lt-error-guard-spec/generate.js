@@ -6,7 +6,8 @@
 
 const fs = require('fs');
 const path = require('path');
-const { problems } = require('./validate');
+const { problems, envelopeProblems } = require('./validate');
+const { verify } = require('./sign');
 
 const root = path.resolve(__dirname, '..');
 const read = f => JSON.parse(fs.readFileSync(path.join(__dirname, f), 'utf8'));
@@ -22,6 +23,18 @@ function specProblems() {
   if (!domains.includes('telemetry')) out.push('contract: the budget reports domain telemetry, which the contract lacks');
   for (const c of read('vectors/decisions.json').cases) {
     if (c.rules !== 'default') out.push(...problems(c.rules).map(p => `vectors/decisions.json "${c.name}": ${p}`));
+  }
+  // The signed fixtures still say what vectors/remote/cases.json expects (an edited file without a new .sig fails here).
+  const remote = path.join(__dirname, 'vectors', 'remote');
+  const manifest = read('vectors/remote/cases.json');
+  const publicPem = fs.readFileSync(path.join(remote, manifest.publicKey), 'utf8');
+  for (const c of manifest.cases) {
+    const body = fs.readFileSync(path.join(remote, c.file));
+    const signed = verify(body, fs.readFileSync(path.join(remote, `${c.file}.sig`), 'utf8'), publicPem);
+    const valid = envelopeProblems(JSON.parse(body.toString('utf8'))).length === 0;
+    const got = !signed ? 'signature' : !valid ? 'rules' : 'applied';
+    const want = c.expect === 'applied' ? 'applied' : c.reason;
+    if (got !== want) out.push(`vectors/remote/${c.file}: expected ${want}, the file gives ${got}`);
   }
   for (const c of read('vectors/invalid.json').cases) {
     const found = problems(c.rules);

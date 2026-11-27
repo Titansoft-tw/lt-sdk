@@ -1,0 +1,11 @@
+{
+  "about": "Signed remote rules files (README \"Remote rules\") that GuardRulesLoader on Android and iOS must treat alike. Signed with test.private.pem, a key for these fixtures only: never use it for real rules. expect: applied (with version) or rejected (reason is the start of the reason string).",
+  "publicKey": "test.pub.pem",
+  "cases": [
+    { "file": "v2.json", "expect": "applied", "version": 2 },
+    { "file": "v3.json", "expect": "applied", "version": 3 },
+    { "file": "tampered.json", "expect": "rejected", "reason": "signature" },
+    { "file": "wrong-key.json", "expect": "rejected", "reason": "signature" },
+    { "file": "invalid-rules.json", "expect": "rejected", "reason": "rules" }
+  ]
+}

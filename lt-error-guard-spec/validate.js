@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /* Checks lt-error-guard rule files (rules.schema.json, plus unique ids). The SDKs' GuardRules.parse rejects the same files.
+ * A remote rules file (an envelope with rulesVersion, README "Remote rules") is checked as one.
  *   node validate.js rules.json [more.json ...]   exit 1 and list the problems when a file is invalid */
 
 const fs = require('fs');
@@ -70,16 +71,32 @@ function problems(rules) {
   return out;
 }
 
+/** Every problem with a remote rules envelope { rulesVersion, rules }; the rules inside are checked by [problems]. */
+function envelopeProblems(env) {
+  if (!isObject(env)) return ['envelope: must be an object'];
+  const out = [];
+  unknownKeys('envelope', env, ['rulesVersion', 'rules'], out);
+  if (!Number.isInteger(env.rulesVersion) || env.rulesVersion < 1 || env.rulesVersion > 1e9) {
+    out.push('rulesVersion: must be an integer from 1 to 1000000000');
+  }
+  if (!('rules' in env)) out.push('rules: missing');
+  else out.push(...problems(env.rules).map(p => `rules.${p}`));
+  return out;
+}
+
 function main(files) {
   if (files.length === 0) { console.error('usage: node validate.js rules.json [more.json ...]'); return 2; }
   let bad = 0;
   for (const file of files) {
     let found;
-    try { found = problems(JSON.parse(fs.readFileSync(file, 'utf8'))); } catch (e) { found = [e.message]; }
+    try {
+      const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+      found = isObject(json) && 'rulesVersion' in json ? envelopeProblems(json) : problems(json);
+    } catch (e) { found = [e.message]; }
     if (found.length) { bad++; console.error(found.map(p => `${file}: ${p}`).join('\n')); } else console.log(`${file}: ok`);
   }
   return bad ? 1 : 0;
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { problems };
+module.exports = { problems, envelopeProblems };

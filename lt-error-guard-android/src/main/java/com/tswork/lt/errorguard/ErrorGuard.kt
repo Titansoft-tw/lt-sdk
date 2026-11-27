@@ -43,12 +43,14 @@ fun interface GuardSink {
  * [endSession]) to the next [endSession]; the app picks it (the process, or one call).
  */
 class ErrorGuard @JvmOverloads constructor(
-    private val rules: GuardRules = GuardRules.DEFAULT,
+    rules: GuardRules = GuardRules.DEFAULT,
     private val sink: GuardSink = GuardSink {},
     /** A draw in [0, 1) for action sample. */
     private val random: () -> Double = { ThreadLocalRandom.current().nextDouble() },
 ) {
     private val lock = Any()
+    /** Read and replaced only under [lock]. */
+    private var rules = rules
     private val seen = HashSet<String>()
     private val tallies = LinkedHashMap<String, Suppressed>()
     private var kept = 0
@@ -75,6 +77,12 @@ class ErrorGuard @JvmOverloads constructor(
         first?.let(sink::suppressed)
         return decision
     }
+
+    /**
+     * Replaces the rules (e.g. from [GuardRulesLoader]); the next event uses them. This session's dedupe marks,
+     * budget and counts stay. Crashes stay protected whatever the rules say.
+     */
+    fun updateRules(rules: GuardRules) = synchronized(lock) { this.rules = rules }
 
     /** Every suppression count in this session, in first-seen order. */
     fun tallies(): List<Suppressed> = synchronized(lock) { tallies.values.toList() }

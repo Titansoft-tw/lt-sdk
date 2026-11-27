@@ -51,7 +51,8 @@ public final class ErrorGuard: @unchecked Sendable {
     public static let budgetDomain = "telemetry"
     public static let budgetCode = "error_budget_exceeded"
 
-    private let rules: GuardRules
+    /// Read and replaced only under `lock`.
+    private var rules: GuardRules
     private let sink: @Sendable (Suppressed) -> Void
     private let random: @Sendable () -> Double
     private let lock = NSLock()
@@ -89,6 +90,10 @@ public final class ErrorGuard: @unchecked Sendable {
         if let first { sink(first) }
         return decision
     }
+
+    /// Replaces the rules (e.g. from `GuardRulesLoader`); the next event uses them. This session's dedupe marks,
+    /// budget and counts stay. Crashes stay protected whatever the rules say.
+    public func updateRules(_ rules: GuardRules) { lock.withLock { self.rules = rules } }
 
     /// Every suppression count in this session, in first-seen order.
     public func tallies() -> [Suppressed] { lock.withLock { order.compactMap { counts[$0] } } }

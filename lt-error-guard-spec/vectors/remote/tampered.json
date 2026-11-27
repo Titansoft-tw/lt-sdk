@@ -1,0 +1,4 @@
+{
+  "rulesVersion": 2,
+  "rules": { "version": 1, "rules": [{ "id": "net", "match": { "exceptionType": ["java.net.*"] }, "action": "keep", "domain": "api", "code": "http_network" }] }
+}

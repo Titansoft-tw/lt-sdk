@@ -74,6 +74,18 @@ class ErrorGuardTest {
         assertEquals(3, GuardRules.parse("""{"version": 1.0, "sessionBudget": {"maxEvents": 3.0}, "rules": []}""").maxEvents)
     }
 
+    @Test fun updateRulesKeepsTheSessionAndStillProtectsCrashes() {
+        val guard = ErrorGuard(GuardRules.parse(net))
+        val e = GuardEvent(exceptionTypes = listOf("java.net.ConnectException"))
+        assertTrue(guard.decide(e).keep)
+        guard.updateRules(GuardRules.parse("""{"version": 1, "rules": [
+            {"id": "net", "match": {}, "action": "dedupe", "domain": "api", "code": "http_network"}]}"""))
+        assertFalse(guard.decide(e).keep) // same rule id: this session's dedupe mark stays
+        guard.updateRules(GuardRules.parse("""{"version": 1, "rules": [{"id": "all", "match": {}, "action": "drop", "domain": "api", "code": "x"}]}"""))
+        assertTrue(guard.decide(GuardEvent(crashed = true)).keep)
+        assertEquals(listOf(Suppressed("net", "api", "http_network", 1)), guard.tallies())
+    }
+
     @Test fun theDefaultSampleDrawIsInRange() {
         val guard = ErrorGuard(GuardRules.parse("""{"version": 1, "rules": [
             {"id": "half", "match": {}, "action": "sample", "rate": 0.5, "domain": "api", "code": "x"}]}"""))
