@@ -1,5 +1,6 @@
 package com.tswork.lt.errorguard.sentry
 
+import com.tswork.lt.errorguard.Decision
 import com.tswork.lt.errorguard.ErrorGuard
 import com.tswork.lt.errorguard.GuardEvent
 import com.tswork.lt.errorguard.GuardRules
@@ -44,6 +45,20 @@ class SentryGuardTest {
             frames = 3, inAppFrames = 1, level = "warning", tags = mapOf("gms" to "missing"),
             crashed = false, fingerprint = "java.net.UnknownHostException|com.app.push.register",
         ), SentryGuard.guardEvent(e))
+    }
+
+    @Test fun anObfuscatedBuildStillTellsCallSitesApart() {
+        // R8 renamed the app's packages, so inAppIncludes matches nothing: no frame is in-app.
+        val at = { function: String -> event(exception("java.lang", "IllegalStateException", "bad state", true,
+            frame("android.os", "Handler.dispatchMessage", null), frame("a.b", function, null))) }
+        val guard = ErrorGuard(GuardRules.DEFAULT)
+        val first = SentryGuard.guardEvent(at("c"))
+        assertEquals("java.lang.IllegalStateException|a.b.c", first.fingerprint)
+        assertEquals(0, first.inAppFrames)
+        // Default third-party-only dedupes them, but per call site: two different bugs are both kept once.
+        assertEquals(Decision(true, "third-party-only"), guard.decide(first))
+        assertEquals(Decision(true, "third-party-only"), guard.decide(SentryGuard.guardEvent(at("d"))))
+        assertEquals(Decision(false, "third-party-only"), guard.decide(SentryGuard.guardEvent(at("c"))))
     }
 
     @Test fun anUnhandledExceptionIsACrash() {

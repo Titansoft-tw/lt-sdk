@@ -32,8 +32,10 @@ object SentryGuard {
         val types = exceptions.map { x -> listOfNotNull(x.module?.takeIf { it.isNotBlank() }, x.type).joinToString(".") }.filter { it.isNotBlank() }
         val message = event.message
         val messages = listOfNotNull(message?.formatted, message?.message) + exceptions.mapNotNull { it.value }
-        // The frame that threw is the last one; its function groups the events a code path sends.
-        val top = frames.lastOrNull { it.isInApp == true }?.let { "${it.module.orEmpty()}.${it.function.orEmpty()}" }
+        // The frame that threw is the last one. The app's own groups a code path's events; without one (an R8 build
+        // whose renamed packages miss inAppIncludes) the top frame still tells call sites apart, as Java stacks start
+        // where the exception was created.
+        val top = (frames.lastOrNull { it.isInApp == true } ?: frames.lastOrNull())?.let { "${it.module.orEmpty()}.${it.function.orEmpty()}" }
         return GuardEvent(
             exceptionTypes = types,
             messages = messages.filter { it.isNotBlank() }.distinct(),
