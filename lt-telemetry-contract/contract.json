@@ -38,10 +38,11 @@
     "agora_audio_route": [],
     "signal_channel": [],
     "signaling": [],
-    "agora_server": []
+    "agora_server": [],
+    "telemetry": ["dropped"]
   },
   "attributes": {
-    "common": ["platform", "os_version", "app_version", "sdk_version", "device_model", "device_brand"],
+    "common": ["platform", "os_version", "app_version", "sdk_version", "device_model", "device_brand", "log.record.uid"],
     "identity": ["call_id", "channel", "leg_uid", "peer_uid", "engine", "role", "server_region", "profile",
                  "test_run_id", "case_id", "test_role", "test_group", "env_ok", "test_scenario",
                  "proxy", "transport", "relay", "ice_policy"],
@@ -55,7 +56,8 @@
     "sdk_event": ["label", "event", "reason", "detail", "source", "session_ms", "fcm_priority", "fcm_original_priority",
                   "app_launch", "wake_ms", "result", "battery_pct", "charging", "power_save", "doze", "battery_opt_exempt",
                   "bg_restricted", "thermal", "standby_bucket", "mic_perm", "notif_perm", "fullscreen_intent_perm",
-                  "period_start", "period_end", "proxy_type", "elapsed_ms", "signal_connect_ms"],
+                  "period_start", "period_end", "proxy_type", "elapsed_ms", "signal_connect_ms",
+                  "dropped_overflow", "dropped_expired", "dropped_rejected", "dropped_corrupt"],
     "app_error": ["error_domain", "error_code", "stage", "fatal", "count", "detail", "source", "sentry_event_id",
                   "net_type", "carrier", "country"],
     "call_summary": ["line", "role", "failed", "reason", "duration_ms", "connect_ms", "ring_ms", "talk_ms", "first_audio_ms",

@@ -275,7 +275,10 @@ object Telemetry {
      * OTLP/HTTP JSON for `/v1/logs`. Device fields go on every record because the views read log attributes;
      * sdk_version comes from the record (the engine that produced it) and is left out when there is none.
      */
-    fun logsJson(records: List<TelemetryRecord>, device: StaticDevice, serviceName: String): String {
+    fun logsJson(records: List<TelemetryRecord>, device: StaticDevice, serviceName: String, observedEpochMs: Long? = null): String {
+        // observedTimeUnixNano = when the batch left the device; timeUnixNano stays when the record was made, so a record
+        // delivered late (after an outage or a crash) shows how late it was.
+        val observed = observedEpochMs?.let { """"observedTimeUnixNano":"${it}000000",""" }.orEmpty()
         val common = mapOf("platform" to device.platform, "os_version" to device.osVersion, "app_version" to device.appVersion) +
             listOfNotNull(device.model.takeIf { it.isNotBlank() }?.let { "device_model" to it },
                 device.brand.takeIf { it.isNotBlank() }?.let { "device_brand" to it })
@@ -283,7 +286,7 @@ object Telemetry {
             val attributes = (common + record.attributes).entries.filterNot { isSecretAttribute(it.key) }.joinToString(",") { (key, value) ->
                 """{"key":${quote(key)},"value":{"stringValue":${quote(value)}}}"""
             }
-            """{"timeUnixNano":"${record.atEpochMs}000000","severityText":${quote(record.severity)},"body":{"stringValue":${quote(record.body)}},"attributes":[$attributes]}"""
+            """{"timeUnixNano":"${record.atEpochMs}000000",$observed"severityText":${quote(record.severity)},"body":{"stringValue":${quote(record.body)}},"attributes":[$attributes]}"""
         }
         return """{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":${quote(serviceName)}}}]},"scopeLogs":[{"logRecords":[$logs]}]}]}"""
     }

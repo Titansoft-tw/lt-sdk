@@ -152,7 +152,10 @@ module.exports = Object.freeze({
     "agora_audio_route": [],
     "signal_channel": [],
     "signaling": [],
-    "agora_server": []
+    "agora_server": [],
+    "telemetry": [
+      "dropped"
+    ]
   },
   "attributes": {
     "common": [
@@ -161,7 +164,8 @@ module.exports = Object.freeze({
       "app_version",
       "sdk_version",
       "device_model",
-      "device_brand"
+      "device_brand",
+      "log.record.uid"
     ],
     "identity": [
       "call_id",
@@ -255,7 +259,11 @@ module.exports = Object.freeze({
       "period_end",
       "proxy_type",
       "elapsed_ms",
-      "signal_connect_ms"
+      "signal_connect_ms",
+      "dropped_overflow",
+      "dropped_expired",
+      "dropped_rejected",
+      "dropped_corrupt"
     ],
     "app_error": [
       "error_domain",

@@ -14,12 +14,14 @@ import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.concurrent.thread
 
-/** The transport against a local HTTP server: delivery, headers, retry, permanent rejection, durable queue. */
+/** The transport against a local HTTP server: delivery, headers, retry and backoff, permanent rejection, the disk queue across restarts. */
 class LtTelemetryTest {
-    private class Hit(val body: String, val auth: String?)
+    private class Hit(val body: String, val auth: String?, val atMs: Long = System.currentTimeMillis())
     private val hits = CopyOnWriteArrayList<Hit>()
     /** Status codes to answer with, in order; 200 once they run out. */
     private val statuses = CopyOnWriteArrayList<Int>()
+    /** Retry-After values sent with the answers above, in the same order (null = none). */
+    private val retryAfters = CopyOnWriteArrayList<String?>()
     // Unit tests compile against android.jar, which has no com.sun.net.httpserver: a minimal HTTP/1.1 server instead.
     private val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
     init {
@@ -33,7 +35,9 @@ class LtTelemetryTest {
                     val body = ByteArray(header("Content-Length")?.toInt() ?: 0).also { var n = 0; while (n < it.size) n += input.read(it, n, it.size - n) }
                     hits += Hit(body.decodeToString(), header("Authorization"))
                     val status = if (statuses.isEmpty()) 200 else statuses.removeAt(0)
-                    s.getOutputStream().write("HTTP/1.1 $status X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+                    val retryAfter = if (retryAfters.isEmpty()) null else retryAfters.removeAt(0)
+                    val extra = retryAfter?.let { "Retry-After: $it\r\n" }.orEmpty()
+                    s.getOutputStream().write("HTTP/1.1 $status X\r\n${extra}Content-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
                 }
             }
         }
@@ -53,9 +57,12 @@ class LtTelemetryTest {
 
     @After fun stop() { server.close(); dir.deleteRecursively() }
 
-    private fun telemetry(url: String? = this.url, requireHttps: Boolean = false, log: (String) -> Unit = {}) = LtTelemetry(
+    private fun telemetry(url: String? = this.url, requireHttps: Boolean = false, retryMs: Long = 50, log: (String) -> Unit = {}) = LtTelemetry(
         TelemetryConfig(url, headers = { mapOf("Authorization" to "Bearer t0k") }, requireHttps = requireHttps,
-            serviceName = "unit-test", device = device, storageDir = dir, log = log), retryMs = 50)
+            serviceName = "unit-test", device = device, storageDir = dir, log = log),
+        retryMs = retryMs, maxRetryMs = retryMs * 4, clock = System::currentTimeMillis, jitter = { 0.5 }, poster = null)
+    private val down = "http://127.0.0.1:1/v1/logs" // Nothing listens: status 0.
+    private fun uids(body: String) = Regex(""""log\.record\.uid","value":\{"stringValue":"([^"]+)"""").findAll(body).map { it.groupValues[1] }.toList()
 
     private fun eventually(what: String, check: () -> Boolean) {
         val until = System.currentTimeMillis() + 5_000
@@ -93,14 +100,88 @@ class LtTelemetryTest {
         assertEquals(4, hits.size)
     }
 
-    @Test fun durableRecordsSurviveARestart() {
-        val error = Telemetry.appError(AppError(ErrorDomain.API, "http_503"), "idle", 1, 1L)
-        val down = telemetry(url = "http://127.0.0.1:1/v1/logs") // Nothing listens: status 0.
-        down.send(listOf(error))
-        eventually("durable file") { File(dir, "telemetry-durable.txt").exists() }
-        telemetry() // Next launch, collector reachable.
-        eventually("sent at launch") { hits.any { it.body.contains("http_503") } }
-        eventually("file removed") { !File(dir, "telemetry-durable.txt").exists() }
+    @Test fun everyRecordSurvivesARestartAndErrorsGoFirst() {
+        val sample = Telemetry.qualitySecond(TelemetryLeg("c-1", "room", "1001", engine = "agora"), AudioMetrics(rttMs = 10.0), 1L)
+        val error = Telemetry.appError(AppError(ErrorDomain.API, "http_503"), "idle", 1, 2L)
+        val offline = telemetry(url = down, retryMs = 60_000)
+        offline.send(listOf(sample, event("background")))
+        offline.send(listOf(error))
+        offline.onWorker { } // The first attempt failed; everything is on disk.
+        assertFalse(offline.queue!!.isEmpty)
+        telemetry() // Next launch (the process died), collector reachable.
+        eventually("all sent at launch") { hits.size == 3 }
+        assertTrue(hits[0].body.contains("http_503")) // app_error first.
+        assertTrue(hits[1].body.contains("\"background\""))
+        assertTrue(hits[2].body.contains("quality_second"))
+        assertTrue(hits.all { it.body.contains("\"observedTimeUnixNano\"") })
+        eventually("queue empty") { dir.resolve(LtTelemetry.QUEUE_DIR).listFiles()!!.none { it.name.endsWith(".log") } }
+    }
+
+    @Test fun theLegacyDurableFileIsImportedOnce() {
+        val legacy = Telemetry.appError(AppError(ErrorDomain.APP_EXIT, "exit_low_memory", fatal = true), "in_call", 1, 5L)
+        File(dir, LtTelemetry.LEGACY_DURABLE_FILE).writeText(TelemetryStore.encode(legacy) + "\n")
+        telemetry()
+        eventually("legacy sent") { hits.any { it.body.contains("exit_low_memory") } }
+        assertFalse(File(dir, LtTelemetry.LEGACY_DURABLE_FILE).exists())
+    }
+
+    @Test fun aRetryKeepsTheRecordUidSoThePlatformCanDeDuplicate() {
+        statuses += 503
+        telemetry().send(listOf(event("a")))
+        eventually("retry") { hits.size == 2 }
+        assertEquals(1, uids(hits[0].body).size)
+        assertEquals(uids(hits[0].body), uids(hits[1].body))
+    }
+
+    @Test fun retryAfterIsHonouredAndFlushDoesNotCutItShort() {
+        statuses += 429; retryAfters += "1"
+        val t = telemetry()
+        t.send(listOf(event("a")))
+        eventually("first post") { hits.size == 1 }
+        t.flush()
+        t.send(listOf(event("b"))) // Waits on disk for the retry.
+        eventually("retry") { hits.size >= 2 } // b follows right after, so the count can jump straight to 3.
+        assertTrue(hits[1].atMs - hits[0].atMs >= 900)
+        eventually("b too") { hits.any { it.body.contains("\"b\"") } }
+    }
+
+    @Test fun flushCutsAClientBackoffShort() {
+        val answers = CopyOnWriteArrayList(listOf(0)) // Offline once, then delivered.
+        val posts = CopyOnWriteArrayList<String>()
+        val t = LtTelemetry(TelemetryConfig(url, requireHttps = false, serviceName = "unit-test", device = device, storageDir = dir),
+            retryMs = 60_000, maxRetryMs = 60_000, clock = System::currentTimeMillis, jitter = { 0.5 },
+            poster = { body -> posts += body; LtTelemetry.PostResult(if (answers.isEmpty()) 200 else answers.removeAt(0)) })
+        t.send(listOf(event("a")))
+        t.onWorker { } // Failed; the next try is a minute away.
+        assertEquals(1, posts.size)
+        t.flush() // The network is back.
+        eventually("sent on flush") { posts.size == 2 }
+        assertTrue(t.onWorker { t.queue!!.isEmpty })
+    }
+
+    @Test fun dropsAreReportedOnceDeliveryWorks() {
+        statuses += 400
+        val t = telemetry()
+        t.send(listOf(event("rejected")))
+        eventually("rejected post") { hits.size == 1 }
+        t.send(listOf(event("next")))
+        eventually("drop report") { hits.any { it.body.contains("\"dropped_rejected\",\"value\":{\"stringValue\":\"1\"}") } }
+        val report = hits.first { it.body.contains("dropped_rejected") }.body
+        assertTrue(report.contains("\"label\",\"value\":{\"stringValue\":\"telemetry\"}"))
+    }
+
+    @Test fun backoffDoublesUpToTheCapWithJitterAndRetryAfterParses() {
+        assertEquals(10_000L, LtTelemetry.backoffDelay(1, 10_000, 300_000, 0.5))
+        assertEquals(20_000L, LtTelemetry.backoffDelay(2, 10_000, 300_000, 0.5))
+        assertEquals(300_000L, LtTelemetry.backoffDelay(20, 10_000, 300_000, 0.5))
+        assertEquals(8_000L, LtTelemetry.backoffDelay(1, 10_000, 300_000, 0.0))
+        assertEquals(11_999L, LtTelemetry.backoffDelay(1, 10_000, 300_000, 0.99999))
+        assertEquals(120_000L, LtTelemetry.parseRetryAfter("120", 0))
+        assertEquals(30_000L, LtTelemetry.parseRetryAfter("Wed, 21 Oct 2015 07:28:30 GMT", 1445412480000L))
+        assertNull(LtTelemetry.parseRetryAfter("soon", 0))
+        assertNull(LtTelemetry.parseRetryAfter(null, 0))
+        assertTrue(LtTelemetry.retryable(0) && LtTelemetry.retryable(429) && LtTelemetry.retryable(503))
+        assertFalse(LtTelemetry.retryable(400) || LtTelemetry.retryable(401))
     }
 
     @Test fun offWithoutUrlOrWithHttpWhenHttpsIsRequired() {

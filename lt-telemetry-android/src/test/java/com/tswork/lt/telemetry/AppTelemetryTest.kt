@@ -194,31 +194,7 @@ class AppTelemetryTest {
         assertTrue((1..20).none { unknown.silentCapture(AudioMetrics(sendKbps = 24.0), muted = false) })
     }
 
-    // TC-12 (AC-8): a durable queue survives a failed send and a restart, sends once, and drops the oldest over its cap.
-    @Test fun tc12_durableQueueSendsOnceAfterRestartAndDropsOldestOverCap() {
-        val store = object : TextStore { var text: String? = null; override fun read() = text; override fun write(text: String) { this.text = text } }
-        val record = Telemetry.appError(AppError(ErrorDomain.API, "http_503", detail = "a=b&c\td\nline 中文"), "idle", 1, 7L, leg = null)
-        val first = DurableTelemetryQueue(store, cap = 3)
-        first.add(listOf(record))
-        assertFalse(first.drain { DurableTelemetryQueue.Outcome.RETRY }) // Offline.
-        val restarted = DurableTelemetryQueue(store, cap = 3)
-        val sent = mutableListOf<TelemetryRecord>()
-        assertTrue(restarted.drain { sent += it; DurableTelemetryQueue.Outcome.SENT })
-        assertEquals(listOf(record), sent)
-        assertTrue(DurableTelemetryQueue(store, cap = 3).drain { sent += it; DurableTelemetryQueue.Outcome.SENT })
-        assertEquals(1, sent.size) // Not again.
-        val capped = DurableTelemetryQueue(store, cap = 3)
-        capped.add((1..5).map { record.copy(atEpochMs = it.toLong()) })
-        assertEquals(listOf(3L, 4L, 5L), capped.pending().map { it.atEpochMs })
-        // A permanent rejection is dropped too, so it cannot block later records.
-        assertTrue(capped.drain { DurableTelemetryQueue.Outcome.REJECTED })
-        assertTrue(capped.pending().isEmpty())
-        // A corrupt file is ignored rather than crashing the app at launch.
-        store.text = "garbage\nmore"
-        assertTrue(DurableTelemetryQueue(store, cap = 3).pending().isEmpty())
-        assertTrue(DurableTelemetryQueue.isDurable(record))
-        assertFalse(DurableTelemetryQueue.isDurable(Telemetry.sdkEvent(leg, "app_state", "x", "background", 1L)))
-    }
+    // TC-12 (AC-8), the durable queue: now every record goes through TelemetryStore (TelemetryStoreTest, LtTelemetryTest).
 
     // TC-10 (AC-7), the marker part: what is written to disk while a call runs is enough to report it later.
     @Test fun tc10_callMarkerRoundTripsAndExitReasonsHaveNames() {

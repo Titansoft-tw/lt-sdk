@@ -45,13 +45,14 @@ object Contract {
         "signal_channel" to listOf(),
         "signaling" to listOf(),
         "agora_server" to listOf(),
+        "telemetry" to listOf("dropped"),
     )
     val ATTRIBUTES: Map<String, List<String>> = mapOf(
-        "common" to listOf("platform", "os_version", "app_version", "sdk_version", "device_model", "device_brand"),
+        "common" to listOf("platform", "os_version", "app_version", "sdk_version", "device_model", "device_brand", "log.record.uid"),
         "identity" to listOf("call_id", "channel", "leg_uid", "peer_uid", "engine", "role", "server_region", "profile", "test_run_id", "case_id", "test_role", "test_group", "env_ok", "test_scenario", "proxy", "transport", "relay", "ice_policy"),
         "trace" to listOf("setup_id", "clock_offset_ms", "relay_recv_ts"),
         "quality_second" to listOf("tx_audio_kbps", "rx_audio_kbps", "tx_loss_pct", "rx_loss_pct", "freeze_rate_pct", "conceal_pct", "mos", "rtt_ms", "jitter_ms", "e2e_delay_ms", "jitter_buffer_ms", "candidate_type", "relay_protocol", "codec", "net_type", "net_type_os", "net_type_sdk", "carrier", "country", "vpn", "exit_country", "wifi_rssi_dbm", "wifi_link_mbps", "wifi_band_ghz", "cell_level", "cell_rsrp_dbm", "cell_sinr_db", "net_expensive", "low_data_mode", "roaming", "audio_route", "audio_device", "bt_profile", "app_fg", "power_save", "thermal", "mic_silenced", "battery_pct"),
-        "sdk_event" to listOf("label", "event", "reason", "detail", "source", "session_ms", "fcm_priority", "fcm_original_priority", "app_launch", "wake_ms", "result", "battery_pct", "charging", "power_save", "doze", "battery_opt_exempt", "bg_restricted", "thermal", "standby_bucket", "mic_perm", "notif_perm", "fullscreen_intent_perm", "period_start", "period_end", "proxy_type", "elapsed_ms", "signal_connect_ms"),
+        "sdk_event" to listOf("label", "event", "reason", "detail", "source", "session_ms", "fcm_priority", "fcm_original_priority", "app_launch", "wake_ms", "result", "battery_pct", "charging", "power_save", "doze", "battery_opt_exempt", "bg_restricted", "thermal", "standby_bucket", "mic_perm", "notif_perm", "fullscreen_intent_perm", "period_start", "period_end", "proxy_type", "elapsed_ms", "signal_connect_ms", "dropped_overflow", "dropped_expired", "dropped_rejected", "dropped_corrupt"),
         "app_error" to listOf("error_domain", "error_code", "stage", "fatal", "count", "detail", "source", "sentry_event_id", "net_type", "carrier", "country"),
         "call_summary" to listOf("line", "role", "failed", "reason", "duration_ms", "connect_ms", "ring_ms", "talk_ms", "first_audio_ms", "reconnect_ms", "reconnects", "samples", "rtt_ms_avg", "rtt_ms_min", "rtt_ms_max", "loss_pct_avg", "loss_pct_min", "loss_pct_max", "jitter_ms_avg", "jitter_ms_min", "jitter_ms_max", "conceal_pct_avg", "conceal_pct_min", "conceal_pct_max", "mos_avg", "mos_min", "mos_max", "receive_kbps_avg", "receive_kbps_min", "receive_kbps_max", "candidate_type", "relay_protocol", "codec", "device", "os", "app_version", "error_domain", "error_code", "source"),
         "case_result" to listOf("rating_clarity", "rating_drop", "run_valid"),
