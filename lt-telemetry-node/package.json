@@ -1,8 +1,8 @@
 {
   "name": "@lt/telemetry-node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Relay-side OTLP/HTTP log reporting for lt-observability, zero dependencies",
+  "description": "Server-side observability for Let's Talk voice backends: OTLP/HTTP logs with a disk queue, retry and remote config, zero dependencies",
   "main": "src/index.js",
   "files": ["src"],
   "engines": { "node": ">=20" },

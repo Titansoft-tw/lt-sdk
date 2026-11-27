@@ -4,10 +4,18 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { createTelemetry, milestoneRecord, setupRecord, summaryRecord, errorRecord, rawRecord, encode } = require('../src');
 const contract = require('../src/contract');
 
 const CALL = '3f2b8c1e-9a4d-4f6b-8e21-0c5d7a9b1e42';
+
+/** A fresh queue directory per reporter, so tests never see each other's records. */
+const dirs = [];
+const tmpDir = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'lt-telemetry-test-')); dirs.push(d); return d; };
+test.after(() => { for (const d of dirs) fs.rmSync(d, { recursive: true, force: true }); });
 
 /** A collector that answers `status` and keeps what it received, flattened to { body, ...attributes }. */
 async function collector(status = 200) {
@@ -16,6 +24,7 @@ async function collector(status = 200) {
     let body = '';
     req.on('data', d => { body += d; });
     req.on('end', () => {
+      if (req.method === 'GET') { c.configGets = (c.configGets || 0) + 1; res.writeHead(404).end(); return; } // no remote config
       c.paths.push(req.url); c.auths.push(req.headers.authorization);
       for (const rl of JSON.parse(body).resourceLogs) {
         c.services.push(rl.resource.attributes.find(a => a.key === 'service.name').value.stringValue);
@@ -45,10 +54,10 @@ const REPORT = {
 
 test('posts to the full URL with the service name, and the token only when set', async t => {
   const c = await collector(); t.after(c.stop);
-  const a = createTelemetry({ url: `${c.url}/v1/logs`, token: 'otlp-token-0123456789', serviceName: 'lt-voice-relay' });
+  const a = createTelemetry({ queueDir: tmpDir(), url: `${c.url}/v1/logs`, token: 'otlp-token-0123456789', serviceName: 'lt-voice-relay' });
   a.summary(REPORT);
   await a.close();
-  const b = createTelemetry({ url: `${c.url}/custom/path`, serviceName: 'other' });
+  const b = createTelemetry({ queueDir: tmpDir(), url: `${c.url}/custom/path`, serviceName: 'other' });
   b.summary(REPORT);
   await b.close();
   assert.deepEqual(c.paths, ['/v1/logs', '/custom/path']); // Nothing appended: the caller gives the whole URL.
@@ -58,7 +67,7 @@ test('posts to the full URL with the service name, and the token only when set',
 
 test('a report is one call_summary with string values; unmeasured values stay absent', async t => {
   const c = await collector(); t.after(c.stop);
-  const s = createTelemetry({ url: `${c.url}/v1/logs`, serviceName: 'lt-voice-relay' });
+  const s = createTelemetry({ queueDir: tmpDir(), url: `${c.url}/v1/logs`, serviceName: 'lt-voice-relay' });
   s.summary(REPORT);
   await s.close();
   assert.equal(c.records.length, 1);
@@ -77,7 +86,7 @@ test('a report is one call_summary with string values; unmeasured values stay ab
 test('a failing collector is logged once and never throws; the URL stays out of the log', async t => {
   const c = await collector(503); t.after(c.stop);
   const lines = [];
-  const s = createTelemetry({ url: `${c.url}/v1/logs`, serviceName: 'lt-voice-relay', log: (...a) => lines.push(a) });
+  const s = createTelemetry({ queueDir: tmpDir(), url: `${c.url}/v1/logs`, serviceName: 'lt-voice-relay', log: (...a) => lines.push(a) });
   s.summary(REPORT); await s.flush();
   s.summary(REPORT); await s.close();
   assert.equal(lines.length, 1);
@@ -86,23 +95,25 @@ test('a failing collector is logged once and never throws; the URL stays out of 
 });
 
 test('off without a URL; serviceName is required when on', async () => {
-  const off = createTelemetry({ url: '', serviceName: 'x' });
+  const off = createTelemetry({ queueDir: tmpDir(), url: '', serviceName: 'x' });
   assert.equal(off.enabled, false);
   off.summary(REPORT); off.milestone({}); await off.close();
   assert.equal(createTelemetry().enabled, false);
-  assert.throws(() => createTelemetry({ url: 'http://x/v1/logs' }), /serviceName/);
+  assert.throws(() => createTelemetry({ queueDir: tmpDir(), url: 'http://x/v1/logs' }), /serviceName/);
 });
 
-test('the queue keeps the newest maxQueue records and sends maxBatch per post', async () => {
+test('records go out in batches of at most 200, oldest first, each with a uid and the send time', async () => {
   const bodies = [];
-  const s = createTelemetry({ url: 'http://x/v1/logs', serviceName: 's', maxQueue: 5, maxBatch: 2,
-    fetch: async (u, init) => { bodies.push(JSON.parse(init.body)); return { ok: true }; } });
-  for (let i = 0; i < 8; i++) s.event({ label: 'agora_server', reason: `r${i}` }, i);
+  const s = createTelemetry({ queueDir: tmpDir(), url: 'http://x/v1/logs', serviceName: 's', configUrl: '',
+    fetch: async (u, init) => { bodies.push(JSON.parse(init.body)); return { status: 200, ok: true }; } });
+  for (let i = 0; i < 450; i++) s.event({ label: 'agora_server', reason: `r${i}` }, i);
   await s.close();
-  const sizes = bodies.map(b => b.resourceLogs[0].scopeLogs[0].logRecords.length);
-  assert.deepEqual(sizes, [2, 2, 1]);
-  const reasons = bodies.flatMap(b => b.resourceLogs[0].scopeLogs[0].logRecords.map(r => r.attributes.find(a => a.key === 'reason').value.stringValue));
-  assert.deepEqual(reasons, ['r3', 'r4', 'r5', 'r6', 'r7']);
+  const logs = bodies.map(b => b.resourceLogs[0].scopeLogs[0].logRecords);
+  assert.deepEqual(logs.map(l => l.length), [200, 200, 50]);
+  const flat = logs.flat();
+  assert.equal(flat[0].attributes.find(a => a.key === 'reason').value.stringValue, 'r0');
+  assert.equal(new Set(flat.map(r => r.attributes.find(a => a.key === 'log.record.uid').value.stringValue)).size, 450);
+  assert.ok(flat.every(r => /^\d{13}000000$/.test(r.observedTimeUnixNano)));
 });
 
 test('milestones need a call id and name hangups by reason', () => {

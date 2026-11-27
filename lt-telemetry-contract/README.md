@@ -13,7 +13,7 @@ the reporting SDKs, and the SDK tests compare their own enums against them.
 ```sh
 node lt-telemetry-contract/generate.js          # regenerate after editing contract.json
 node lt-telemetry-contract/generate.js --check  # CI: rules hold and outputs are up to date
-node --test lt-telemetry-contract               # generator tests
+node --test lt-telemetry-contract/generate.test.js   # generator tests
 ```
 
 Rules checked on every run:
